@@ -1,7 +1,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.enums import GenderEnum, RoleEnum
+from app.models.enums import GenderEnum, RoleEnum, UserStatus
 from app.models.user import User
 
 
@@ -32,20 +32,31 @@ class UserRepository:
         password_hash: str,
         gender: GenderEnum,
         role: RoleEnum = RoleEnum.STUDENT,
-        is_active: bool = True,
+        status: UserStatus | None = None,
+        is_active: bool | None = None,
         university_id: int | None = None,
         faculty: str | None = None,
         academic_year: str | None = None,
         university_id_card_image: str | None = None,
         is_phone_verified: bool = False,
+        rejection_reason: str | None = None,
     ) -> User:
         """Create and persist a new user record."""
+        if status is None and is_active is None:
+            status = UserStatus.ACTIVE
+            is_active = True
+        elif status is not None and is_active is None:
+            is_active = status == UserStatus.ACTIVE
+        elif status is None and is_active is not None:
+            status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
+
         user = User(
             full_name=full_name.strip(),
             phone_number=phone_number.strip(),
             password_hash=password_hash,
             gender=gender,
             role=role,
+            status=status,
             is_active=is_active,
             university_id=university_id,
             faculty=faculty.strip() if faculty else None,
@@ -54,6 +65,7 @@ class UserRepository:
             if university_id_card_image
             else None,
             is_phone_verified=is_phone_verified,
+            rejection_reason=rejection_reason.strip() if rejection_reason else None,
         )
         self.db.add(user)
         self.db.commit()
@@ -66,6 +78,7 @@ class UserRepository:
         page_size: int = 20,
         role: RoleEnum | None = None,
         is_active: bool | None = None,
+        status: UserStatus | None = None,
     ) -> tuple[list[User], int]:
         """List users with pagination, optional filtering, and stable ordering."""
         stmt = select(User)
@@ -78,6 +91,10 @@ class UserRepository:
         if is_active is not None:
             stmt = stmt.where(User.is_active == is_active)
             count_stmt = count_stmt.where(User.is_active == is_active)
+
+        if status is not None:
+            stmt = stmt.where(User.status == status)
+            count_stmt = count_stmt.where(User.status == status)
 
         total = self.db.scalar(count_stmt) or 0
 
@@ -101,12 +118,14 @@ class UserRepository:
         full_name: str | None = None,
         gender: GenderEnum | None = None,
         role: RoleEnum | None = None,
+        status: UserStatus | None = None,
         is_active: bool | None = None,
         university_id: int | None = None,
         faculty: str | None = None,
         academic_year: str | None = None,
         university_id_card_image: str | None = None,
         phone_number: str | None = None,
+        rejection_reason: str | None = None,
     ) -> User:
         """Apply updates to an existing user entity and commit changes."""
         if full_name is not None:
@@ -115,8 +134,14 @@ class UserRepository:
             user.gender = gender
         if role is not None:
             user.role = role
+        if status is not None:
+            user.status = status
+            if is_active is None:
+                user.is_active = status == UserStatus.ACTIVE
         if is_active is not None:
             user.is_active = is_active
+            if status is None:
+                user.status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
         if university_id is not None:
             user.university_id = university_id
         if faculty is not None:
@@ -131,9 +156,33 @@ class UserRepository:
             )
         if phone_number is not None:
             user.phone_number = phone_number.strip()
+        if rejection_reason is not None:
+            user.rejection_reason = rejection_reason.strip() if rejection_reason else None
 
         self.db.commit()
         self.db.refresh(user)
+        return user
+
+    def approve_user(self, user_id: int) -> User | None:
+        """Approve a user account: set status to ACTIVE, is_active to True, and clear rejection reason."""
+        user = self.get_by_id(user_id)
+        if user:
+            user.status = UserStatus.ACTIVE
+            user.is_active = True
+            user.rejection_reason = None
+            self.db.commit()
+            self.db.refresh(user)
+        return user
+
+    def reject_user(self, user_id: int, reason: str | None = None) -> User | None:
+        """Reject a user account: set status to REJECTED, is_active to False, and store rejection reason."""
+        user = self.get_by_id(user_id)
+        if user:
+            user.status = UserStatus.REJECTED
+            user.is_active = False
+            user.rejection_reason = reason.strip() if reason else None
+            self.db.commit()
+            self.db.refresh(user)
         return user
 
     def set_phone_verified(self, user_id: int, verified: bool = True) -> User | None:

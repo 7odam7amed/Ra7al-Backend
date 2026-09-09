@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from app.core.security import hash_password
@@ -7,10 +8,12 @@ from app.exceptions.base import (
     NotFoundError,
     ValidationError,
 )
-from app.models.enums import RoleEnum
+from app.models.enums import RoleEnum, UserStatus
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import SupervisorCreateRequest, UserUpdateRequest
+
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -25,6 +28,7 @@ class UserService:
         page_size: int = 20,
         role: RoleEnum | None = None,
         is_active: bool | None = None,
+        status: UserStatus | None = None,
     ) -> tuple[list[User], int]:
         """Retrieve a paginated list of users with optional filtering."""
         if page < 1:
@@ -37,6 +41,7 @@ class UserService:
             page_size=page_size,
             role=role,
             is_active=is_active,
+            status=status,
         )
 
     def get_user_by_id(self, user_id: int) -> User:
@@ -97,6 +102,7 @@ class UserService:
             password_hash=pwd_hash,
             gender=data.gender,
             role=RoleEnum.SUPERVISOR,
+            status=UserStatus.ACTIVE,
             is_active=True,
         )
 
@@ -141,18 +147,68 @@ class UserService:
 
         return self.user_repo.update(target_user, role=new_role)
 
-    def update_user_status(self, user_id: int, is_active: bool) -> User:
+    def approve_user(self, user_id: int) -> User:
+        """Approve a pending student account (CEO only).
+        
+        Transitions PENDING -> ACTIVE, keeps role as STUDENT, clears rejection reason.
+        Cannot approve already rejected users.
+        """
+        target_user = self.get_user_by_id(user_id)
+        if target_user.status == UserStatus.REJECTED:
+            raise ValidationError("Cannot approve a rejected user account")
+        if target_user.status == UserStatus.ACTIVE:
+            return target_user
+
+        user = self.user_repo.approve_user(user_id)
+        logger.info("CEO approved user id=%s (%s)", user.id, user.phone_number)
+        return user
+
+    def reject_user(self, user_id: int, reason: str | None = None) -> User:
+        """Reject a user account with optional rejection reason (CEO only).
+        
+        Transitions PENDING -> REJECTED. Cannot reject an already active user.
+        """
+        target_user = self.get_user_by_id(user_id)
+        if target_user.status == UserStatus.ACTIVE:
+            raise ValidationError("Cannot reject an already active user account")
+
+        user = self.user_repo.reject_user(user_id, reason)
+        logger.info("CEO rejected user id=%s (%s), reason=%s", user.id, user.phone_number, reason)
+        return user
+
+    def update_user_status(
+        self,
+        user_id: int,
+        is_active: bool | None = None,
+        status: UserStatus | None = None,
+    ) -> User:
         """Activate or deactivate a user account with CEO safety protection."""
         target_user = self.get_user_by_id(user_id)
+
+        # Determine target active and status states
+        target_active = is_active
+        target_status = status
+
+        if target_status is not None and target_active is None:
+            target_active = target_status == UserStatus.ACTIVE
+        elif target_active is not None and target_status is None:
+            target_status = UserStatus.ACTIVE if target_active else UserStatus.INACTIVE
+
+        if target_active is None:
+            target_active = target_user.is_active
+        if target_status is None:
+            target_status = target_user.status
 
         # Protect against deactivating the last active CEO
         if (
             target_user.role == RoleEnum.CEO
             and target_user.is_active
-            and not is_active
+            and not target_active
         ):
             active_ceos = self.user_repo.count_active_ceos()
             if active_ceos <= 1:
                 raise ValidationError("Cannot deactivate the last active CEO account")
 
-        return self.user_repo.update(target_user, is_active=is_active)
+        return self.user_repo.update(
+            target_user, is_active=target_active, status=target_status
+        )

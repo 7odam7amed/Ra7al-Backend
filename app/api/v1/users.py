@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import FileResponse
 
 from app.api.deps import CEO_ONLY, get_current_user, get_user_service
-from app.models.enums import RoleEnum
+from app.models.enums import RoleEnum, UserStatus
 from app.models.user import User
 from app.schemas.user import (
     PaginatedUserResponse,
     SupervisorCreateRequest,
+    UserRejectRequest,
     UserResponse,
     UserRoleUpdateRequest,
     UserStatusUpdateRequest,
@@ -28,14 +29,16 @@ def list_users(
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
     role: RoleEnum | None = Query(default=None, description="Filter by user role"),
     is_active: bool | None = Query(default=None, description="Filter by active status"),
+    status: UserStatus | None = Query(default=None, description="Filter by user lifecycle status"),
     user_service: UserService = Depends(get_user_service),
 ) -> PaginatedUserResponse:
-    """List users in the system with optional role/status filters."""
+    """List users in the system with optional role/status/is_active filters."""
     users, total = user_service.list_users(
         page=page,
         page_size=page_size,
         role=role,
         is_active=is_active,
+        status=status,
     )
     items = [UserResponse.model_validate(u) for u in users]
     return PaginatedUserResponse.create(
@@ -139,5 +142,51 @@ def update_user_status(
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Activate or deactivate a user account. Enforces CEO safety protections."""
-    user = user_service.update_user_status(user_id, data.is_active)
+    user = user_service.update_user_status(
+        user_id, is_active=data.is_active, status=data.status
+    )
+    return UserResponse.model_validate(user)
+
+
+@users_router.patch(
+    "/{user_id}/approve",
+    response_model=UserResponse,
+    summary="Approve a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
+@users_router.post(
+    "/{user_id}/approve",
+    response_model=UserResponse,
+    summary="Approve a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
+def approve_user(
+    user_id: int,
+    user_service: UserService = Depends(get_user_service),
+) -> UserResponse:
+    """Approve a pending student account. Status transitions PENDING -> ACTIVE."""
+    user = user_service.approve_user(user_id)
+    return UserResponse.model_validate(user)
+
+
+@users_router.patch(
+    "/{user_id}/reject",
+    response_model=UserResponse,
+    summary="Reject a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
+@users_router.post(
+    "/{user_id}/reject",
+    response_model=UserResponse,
+    summary="Reject a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
+def reject_user(
+    user_id: int,
+    data: UserRejectRequest | None = None,
+    user_service: UserService = Depends(get_user_service),
+) -> UserResponse:
+    """Reject a pending student account. Status transitions PENDING -> REJECTED."""
+    reason = data.reason if data else None
+    user = user_service.reject_user(user_id, reason=reason)
     return UserResponse.model_validate(user)

@@ -958,7 +958,7 @@ def test_comprehensive_rbac_matrix(
     sub_payload = {
         "route_id": env["route_a"].id,
         "plan_id": env["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": datetime.now(timezone.utc).date().isoformat(),
         "outbound_pickup_point_id": env["p_out_a"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }

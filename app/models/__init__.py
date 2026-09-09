@@ -19,6 +19,8 @@ from app.models.enums import (
     SubscriptionStatus,
     TripStatus,
     TripStatusEnum,
+    UserStatus,
+    UserStatusEnum,
 )
 from app.models.otp_verification import OTPVerification
 from app.models.payment import Payment
@@ -64,5 +66,7 @@ __all__ = [
     "TripStatusEnum",
     "University",
     "User",
+    "UserStatus",
+    "UserStatusEnum",
 ]
 

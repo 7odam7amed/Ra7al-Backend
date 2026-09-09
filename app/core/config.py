@@ -125,17 +125,11 @@ class Settings(BaseSettings):
                     "Default local PostgreSQL credentials (postgres:postgres@localhost) are forbidden in production"
                 )
             if self.WHATSAPP_PROVIDER == "mock":
-                raise ValueError(
-                    "Mock WhatsApp provider is forbidden in production environment. Configure a live WhatsApp provider."
-                )
+                raise ValueError("Mock WhatsApp provider is forbidden in production")
             if self.WHATSAPP_PROVIDER == "cloud_api":
-                if not self.WHATSAPP_PHONE_NUMBER_ID or not self.WHATSAPP_PHONE_NUMBER_ID.strip():
+                if not self.WHATSAPP_PHONE_NUMBER_ID or not self.WHATSAPP_API_TOKEN:
                     raise ValueError(
-                        "WHATSAPP_PHONE_NUMBER_ID must be configured when WHATSAPP_PROVIDER is 'cloud_api' in production"
-                    )
-                if not self.WHATSAPP_API_TOKEN or not self.WHATSAPP_API_TOKEN.strip():
-                    raise ValueError(
-                        "WHATSAPP_API_TOKEN must be configured when WHATSAPP_PROVIDER is 'cloud_api' in production"
+                        "WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_API_TOKEN are required for cloud_api in production"
                     )
         return self
 

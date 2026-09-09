@@ -3,7 +3,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import GenderEnum, RoleEnum
+from app.models.enums import GenderEnum, RoleEnum, UserStatus
 
 import math
 
@@ -139,7 +139,19 @@ class UserRoleUpdateRequest(BaseModel):
 class UserStatusUpdateRequest(BaseModel):
     """Schema for activating or deactivating a user account (CEO only)."""
 
-    is_active: bool = Field(..., examples=[True, False])
+    is_active: bool | None = Field(default=None, examples=[True, False])
+    status: UserStatus | None = Field(default=None, examples=[UserStatus.ACTIVE, UserStatus.INACTIVE])
+
+
+class UserRejectRequest(BaseModel):
+    """Schema for CEO rejecting a pending user registration."""
+
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional reason explaining why the account registration was rejected",
+        examples=["University ID card image is blurred and illegible."],
+    )
 
 
 class UserResponse(BaseModel):
@@ -152,6 +164,8 @@ class UserResponse(BaseModel):
     phone_number: str
     gender: GenderEnum
     role: RoleEnum
+    status: UserStatus = UserStatus.PENDING
+    rejection_reason: str | None = None
     is_active: bool
     is_phone_verified: bool = False
     university_id: int | None = None
@@ -160,6 +174,15 @@ class UserResponse(BaseModel):
     university_id_card_image: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class UserRegisterResponse(UserResponse):
+    """Safe user representation returned upon student registration awaiting CEO approval."""
+
+    message: str = Field(
+        default="Registration submitted. Your account is pending CEO approval.",
+        description="Informational message about the account lifecycle state",
+    )
 
 
 

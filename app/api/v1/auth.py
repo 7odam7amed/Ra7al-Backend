@@ -5,14 +5,12 @@ from app.api.deps import get_auth_service, get_current_user
 from app.core.rate_limiter import (
     login_rate_limiter,
     register_rate_limiter,
-    resend_otp_rate_limiter,
     upload_id_card_rate_limiter,
-    verify_otp_rate_limiter,
 )
 from app.core.storage import storage_service
 from app.models.user import User
-from app.schemas.auth import OTPResponse, ResendOTPRequest, TokenResponse, VerifyOTPRequest
-from app.schemas.user import UserRegisterRequest, UserResponse
+from app.schemas.auth import TokenResponse
+from app.schemas.user import UserRegisterRequest, UserRegisterResponse, UserResponse
 from app.services.auth_service import AuthService
 
 auth_router = APIRouter()
@@ -34,61 +32,18 @@ def upload_id_card(
 
 @auth_router.post(
     "/register",
-    response_model=UserResponse,
+    response_model=UserRegisterResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new student account",
+    summary="Register a new student account (pending CEO approval)",
     dependencies=[Depends(register_rate_limiter)],
 )
 def register(
     data: UserRegisterRequest,
     auth_service: AuthService = Depends(get_auth_service),
-) -> UserResponse:
-    """Public registration endpoint. Creates an unverified student account and dispatches WhatsApp OTP."""
+) -> UserRegisterResponse:
+    """Public registration endpoint. Creates a student account with status PENDING awaiting CEO approval."""
     user = auth_service.register_user(data)
-    return UserResponse.model_validate(user)
-
-
-@auth_router.post(
-    "/verify-otp",
-    response_model=OTPResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Verify WhatsApp OTP code to activate account",
-    dependencies=[Depends(verify_otp_rate_limiter)],
-)
-def verify_otp(
-    data: VerifyOTPRequest,
-    auth_service: AuthService = Depends(get_auth_service),
-) -> OTPResponse:
-    """Submit received WhatsApp OTP code to verify student phone number."""
-    user = auth_service.verify_otp(
-        phone_number=data.phone_number,
-        otp_code=data.otp_code,
-    )
-    return OTPResponse(
-        message="Phone number successfully verified. You can now log in.",
-        phone_number=user.phone_number,
-        is_phone_verified=user.is_phone_verified,
-    )
-
-
-@auth_router.post(
-    "/resend-otp",
-    response_model=OTPResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Resend WhatsApp OTP verification code",
-    dependencies=[Depends(resend_otp_rate_limiter)],
-)
-def resend_otp(
-    data: ResendOTPRequest,
-    auth_service: AuthService = Depends(get_auth_service),
-) -> OTPResponse:
-    """Trigger generation and WhatsApp dispatch of a new OTP verification code."""
-    auth_service.resend_otp(phone_number=data.phone_number)
-    return OTPResponse(
-        message="Verification code resent successfully via WhatsApp.",
-        phone_number=data.phone_number,
-        is_phone_verified=False,
-    )
+    return UserRegisterResponse.model_validate(user)
 
 
 

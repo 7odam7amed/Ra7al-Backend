@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import create_access_token, decode_access_token, hash_password
-from app.models.enums import GenderEnum, RoleEnum
+from app.models.enums import GenderEnum, RoleEnum, UserStatus
 from app.models.university import University
 from app.models.user import User
 
@@ -27,15 +27,19 @@ def _create_user_with_role(
     role: RoleEnum,
     password: str = "SecurePass123!",
     is_active: bool = True,
+    status: UserStatus | None = None,
     full_name: str = "Test User",
     is_phone_verified: bool = True,
 ) -> User:
+    if status is None:
+        status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
     user = User(
         full_name=full_name,
         phone_number=phone_number,
         password_hash=hash_password(password),
         gender=GenderEnum.MALE,
         role=role,
+        status=status,
         is_active=is_active,
         is_phone_verified=is_phone_verified,
     )
@@ -67,7 +71,9 @@ def test_register_student_success(
     assert data["phone_number"] == "+201012345678"
     assert data["role"] == "STUDENT"
     assert data["gender"] == "MALE"
-    assert data["is_active"] is True
+    assert data["status"] == "PENDING"
+    assert data["is_active"] is False
+    assert "pending ceo approval" in data["message"].lower()
     assert data["university_id"] == uni.id
     assert data["faculty"] == "Faculty of Engineering"
     assert data["academic_year"] == "3rd Year"
@@ -233,7 +239,9 @@ def test_upload_id_card_oversized_file_rejected(client_with_db: TestClient) -> N
 
 
 def test_login_success(client_with_db: TestClient, db_session: Session) -> None:
-    from app.api.deps import get_whatsapp_service
+    from app.repositories.user_repository import UserRepository
+    from app.services.user_service import UserService
+
     uni = _create_test_university(db_session, "Cairo University")
     register_payload = {
         "full_name": "Sara Omar",
@@ -245,23 +253,26 @@ def test_login_success(client_with_db: TestClient, db_session: Session) -> None:
         "academic_year": "2nd Year",
         "university_id_card_image": "uploads/id_cards/sara.png",
     }
-    client_with_db.post("/api/v1/auth/register", json=register_payload)
+    reg_resp = client_with_db.post("/api/v1/auth/register", json=register_payload)
+    assert reg_resp.status_code == 201
+    user_id = reg_resp.json()["id"]
 
-    # Obtain the dispatched mock OTP and verify phone number
-    whatsapp_svc = get_whatsapp_service()
-    otp_code = getattr(whatsapp_svc.provider, "last_otp_code", "123456")
-    verify_resp = client_with_db.post(
-        "/api/v1/auth/verify-otp",
-        json={"phone_number": "+201011223344", "otp_code": otp_code},
-    )
-    assert verify_resp.status_code == 200
-    assert verify_resp.json()["is_phone_verified"] is True
-
-    # Login using OAuth2 form data with phone_number in username field
     login_data = {
         "username": "+201011223344",
         "password": "SecurePassword456!",
     }
+
+    # Before approval: login blocked with 403
+    blocked_resp = client_with_db.post("/api/v1/auth/login", data=login_data)
+    assert blocked_resp.status_code == 403
+    assert "pending ceo approval" in blocked_resp.json()["detail"].lower()
+
+    # CEO approves the user
+    user_service = UserService(UserRepository(db_session))
+    approved_user = user_service.approve_user(user_id)
+    assert approved_user.status == UserStatus.ACTIVE
+
+    # Login succeeds after approval
     response = client_with_db.post("/api/v1/auth/login", data=login_data)
     assert response.status_code == 200
     data = response.json()
@@ -276,7 +287,9 @@ def test_login_success(client_with_db: TestClient, db_session: Session) -> None:
 def test_login_invalid_password_returns_401(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    from app.api.deps import get_whatsapp_service
+    from app.repositories.user_repository import UserRepository
+    from app.services.user_service import UserService
+
     uni = _create_test_university(db_session, "Cairo University")
     register_payload = {
         "full_name": "Sara Omar",
@@ -288,16 +301,12 @@ def test_login_invalid_password_returns_401(
         "academic_year": "2nd Year",
         "university_id_card_image": "uploads/id_cards/sara.png",
     }
-    client_with_db.post("/api/v1/auth/register", json=register_payload)
+    reg_resp = client_with_db.post("/api/v1/auth/register", json=register_payload)
+    user_id = reg_resp.json()["id"]
 
-    # Verify OTP first so the user is verified
-    whatsapp_svc = get_whatsapp_service()
-    otp_code = getattr(whatsapp_svc.provider, "last_otp_code", "123456")
-    verify_resp = client_with_db.post(
-        "/api/v1/auth/verify-otp",
-        json={"phone_number": "+201055667788", "otp_code": otp_code},
-    )
-    assert verify_resp.status_code == 200
+    # CEO approves the user
+    user_service = UserService(UserRepository(db_session))
+    user_service.approve_user(user_id)
 
     login_data = {
         "username": "+201055667788",
@@ -318,7 +327,7 @@ def test_login_unknown_phone_number_returns_401(client_with_db: TestClient) -> N
     assert "incorrect phone number or password" in response.json()["detail"].lower()
 
 
-def test_login_inactive_user_returns_401(
+def test_login_inactive_user_returns_403(
     client_with_db: TestClient, db_session: Session
 ) -> None:
     _create_user_with_role(
@@ -333,7 +342,7 @@ def test_login_inactive_user_returns_401(
         "password": "SecurePass123!",
     }
     response = client_with_db.post("/api/v1/auth/login", data=login_data)
-    assert response.status_code == 401
+    assert response.status_code == 403
     assert "inactive" in response.json()["detail"].lower()
 
 
@@ -459,14 +468,13 @@ def test_get_current_user_me_endpoint_success(
     reg_resp = client_with_db.post("/api/v1/auth/register", json=register_payload)
     user_id = reg_resp.json()["id"]
 
-    # Verify OTP
-    whatsapp_svc = get_whatsapp_service()
-    otp_code = getattr(whatsapp_svc.provider, "last_otp_code", "123456")
-    verify_resp = client_with_db.post(
-        "/api/v1/auth/verify-otp",
-        json={"phone_number": "+201099887766", "otp_code": otp_code},
-    )
-    assert verify_resp.status_code == 200
+    # CEO approves the user
+    from app.repositories.user_repository import UserRepository
+    from app.services.user_service import UserService
+
+    user_service = UserService(UserRepository(db_session))
+    approved_user = user_service.approve_user(user_id)
+    assert approved_user.status == UserStatus.ACTIVE
 
     login_resp = client_with_db.post(
         "/api/v1/auth/login",

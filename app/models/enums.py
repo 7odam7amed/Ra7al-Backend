@@ -9,6 +9,19 @@ class RoleEnum(enum.StrEnum):
     STUDENT = "STUDENT"
 
 
+class UserStatus(enum.StrEnum):
+    """User account lifecycle status."""
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    REJECTED = "REJECTED"
+    INACTIVE = "INACTIVE"
+
+
+# Canonical alias for compatibility
+UserStatusEnum = UserStatus
+
+
 class GenderEnum(enum.StrEnum):
     """User gender enumeration."""
 

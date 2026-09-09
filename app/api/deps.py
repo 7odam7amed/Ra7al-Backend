@@ -9,7 +9,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.exceptions.base import ForbiddenError, UnauthorizedError
-from app.models.enums import RoleEnum
+from app.models.enums import RoleEnum, UserStatus
 from app.models.user import User
 from app.repositories.boarding_repository import BoardingRepository
 from app.repositories.bus_repository import BusRepository
@@ -147,15 +147,11 @@ def get_whatsapp_service() -> WhatsAppService:
 def get_auth_service(
     user_repo: UserRepository = Depends(get_user_repository),
     university_repo: UniversityRepository = Depends(get_university_repository),
-    otp_repo: OTPRepository = Depends(get_otp_repository),
-    whatsapp_service: WhatsAppService = Depends(get_whatsapp_service),
 ) -> AuthService:
     """Dependency returning an AuthService instance."""
     return AuthService(
         user_repo=user_repo,
         university_repo=university_repo,
-        otp_repo=otp_repo,
-        whatsapp_service=whatsapp_service,
     )
 
 
@@ -344,7 +340,7 @@ def get_current_user(
     if not user:
         raise UnauthorizedError("User does not exist")
 
-    if not user.is_active:
+    if not user.is_active or user.status != UserStatus.ACTIVE:
         raise UnauthorizedError("User account is inactive")
 
     return user

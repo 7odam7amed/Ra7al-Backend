@@ -1,3 +1,4 @@
+import calendar
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from fastapi.testclient import TestClient
@@ -175,6 +176,33 @@ def _setup_transit_fixtures(
     }
 
 
+def _add_calendar_months(start_date: date, months: int) -> date:
+    """Calculate end_date exactly according to the production calendar month logic."""
+    month = start_date.month - 1 + months
+    year = start_date.year + month // 12
+    target_month = month % 12 + 1
+    day = min(start_date.day, calendar.monthrange(year, target_month)[1])
+    return date(year, target_month, day)
+
+
+def _get_boundary_test_cases():
+    """Dynamically generate month boundary test cases for upcoming future years."""
+    base_year = datetime.now(timezone.utc).year + 1
+    non_leap = base_year
+    while calendar.isleap(non_leap):
+        non_leap += 1
+    leap = base_year
+    while not calendar.isleap(leap):
+        leap += 1
+    return [
+        (date(non_leap, 1, 31), date(non_leap, 2, 28)),  # Jan 31 -> Feb 28 (non-leap year)
+        (date(leap, 1, 31), date(leap, 2, 29)),          # Jan 31 -> Feb 29 (leap year)
+        (date(base_year, 8, 31), date(base_year, 9, 30)),  # Aug 31 -> Sep 30
+        (date(base_year, 5, 31), date(base_year, 6, 30)),  # May 31 -> Jun 30
+        (date(base_year, 12, 31), date(base_year + 1, 1, 31)), # Dec 31 -> Jan 31 (year transition)
+    ]
+
+
 # =========================================================================
 # PART 1: SUBSCRIPTION TESTS
 # =========================================================================
@@ -189,7 +217,7 @@ def test_daily_subscription_creation_and_contract(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    start_d = date(2026, 9, 15)
+    start_d = datetime.now(timezone.utc).date() + timedelta(days=5)
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
@@ -207,8 +235,8 @@ def test_daily_subscription_creation_and_contract(
     assert data["route_id"] == fixtures["route1"].id
     assert data["plan_id"] == fixtures["plan_daily"].id
     assert float(data["price_snapshot"]) == 45.0
-    assert data["start_date"] == "2026-09-15"
-    assert data["end_date"] == "2026-09-15"  # DAILY contract: single transportation service date
+    assert data["start_date"] == start_d.isoformat()
+    assert data["end_date"] == start_d.isoformat()  # DAILY contract: single transportation service date
     assert data["status"] == "PENDING"
     assert data["payment_id"] is not None
 
@@ -223,7 +251,8 @@ def test_monthly_subscription_creation_and_contract(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    start_d = date(2026, 9, 1)
+    start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
+    expected_end = _add_calendar_months(start_d, 1)
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
@@ -238,20 +267,14 @@ def test_monthly_subscription_creation_and_contract(
 
     assert data["plan_id"] == fixtures["plan_monthly"].id
     assert float(data["price_snapshot"]) == 750.0
-    assert data["start_date"] == "2026-09-01"
-    assert data["end_date"] == "2026-10-01"  # Exactly 1 calendar month
+    assert data["start_date"] == start_d.isoformat()
+    assert data["end_date"] == expected_end.isoformat()  # Exactly 1 calendar month
     assert data["status"] == "PENDING"
 
 
 @pytest.mark.parametrize(
     "start_input, expected_end",
-    [
-        (date(2027, 1, 31), date(2027, 2, 28)),  # Jan 31 -> Feb 28 (non-leap year 2027)
-        (date(2028, 1, 31), date(2028, 2, 29)),  # Jan 31 -> Feb 29 (leap year 2028)
-        (date(2026, 8, 31), date(2026, 9, 30)),  # Aug 31 -> Sep 30
-        (date(2027, 5, 31), date(2027, 6, 30)),  # May 31 -> Jun 30
-        (date(2026, 12, 31), date(2027, 1, 31)), # Dec 31 -> Jan 31 (year transition)
-    ],
+    _get_boundary_test_cases(),
 )
 def test_monthly_subscription_month_boundary_edge_cases(
     client_with_db: TestClient, db_session: Session, start_input: date, expected_end: date
@@ -287,8 +310,9 @@ def test_term_subscription_duration_and_pricing(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    # Start date Sep 1 -> End date Dec 1 (3 calendar months)
-    start_d = date(2026, 9, 1)
+    # Start date dynamically relative to today -> End date 3 calendar months later
+    start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
+    expected_end = _add_calendar_months(start_d, 3)
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_term"].id,
@@ -300,8 +324,8 @@ def test_term_subscription_duration_and_pricing(
     assert res.status_code == 201
     data = res.json()
 
-    assert data["start_date"] == "2026-09-01"
-    assert data["end_date"] == "2026-12-01"
+    assert data["start_date"] == start_d.isoformat()
+    assert data["end_date"] == expected_end.isoformat()
     assert float(data["price_snapshot"]) == 2000.0
 
 
@@ -321,10 +345,11 @@ def test_independent_plan_pricing_and_price_snapshot_immutability(
     assert fixtures["plan_term"].price == Decimal("2000.00")
 
     # Create monthly subscription
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -360,10 +385,11 @@ def test_subscription_payment_lifecycle_unverified_to_active(
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
     # 1. Create subscription with unverified payment
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "INSTAPAY",
@@ -423,10 +449,11 @@ def test_subscription_payment_rejection_lifecycle(
     ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "VODAFONE_CASH",
@@ -465,11 +492,12 @@ def test_overlapping_subscription_same_route_active_and_pending_rejected(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    # 1. Create first subscription (Sep 1 to Oct 1)
+    today = datetime.now(timezone.utc).date()
+    # 1. Create first subscription (1 calendar month)
     payload1 = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today.isoformat(),
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -480,7 +508,7 @@ def test_overlapping_subscription_same_route_active_and_pending_rejected(
     payload_overlap = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
-        "start_date": "2026-09-15",
+        "start_date": (today + timedelta(days=10)).isoformat(),
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -498,11 +526,13 @@ def test_non_overlapping_and_different_route_subscriptions_allowed(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
+    today = datetime.now(timezone.utc).date()
+
     # 1. Subscription on Route 1
     payload1 = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
-        "start_date": "2026-09-01",
+        "start_date": today.isoformat(),
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -514,7 +544,7 @@ def test_non_overlapping_and_different_route_subscriptions_allowed(
     payload_route2 = {
         "route_id": fixtures["route2"].id,
         "plan_id": fixtures["plan_daily"].id,
-        "start_date": "2026-09-01",
+        "start_date": today.isoformat(),
         "outbound_pickup_point_id": fixtures["p1_route2"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -529,7 +559,7 @@ def test_non_overlapping_and_different_route_subscriptions_allowed(
     payload_after_cancel = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
-        "start_date": "2026-09-05",
+        "start_date": (today + timedelta(days=5)).isoformat(),
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -551,10 +581,11 @@ def test_same_return_pickup_mode_normalizes_to_outbound(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
         "return_pickup_point_id": fixtures["p2_route1"].id,  # Provided alternate ID must be normalized
@@ -578,10 +609,11 @@ def test_different_return_pickup_mode_persisted_correctly(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "DIFFERENT",
         "return_pickup_point_id": fixtures["p2_route1"].id,
@@ -605,11 +637,12 @@ def test_pickup_from_another_route_rejected(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
+    today_str = datetime.now(timezone.utc).date().isoformat()
     # Outbound on Route 1, Return pickup from Route 2 -> Rejected
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "DIFFERENT",
         "return_pickup_point_id": fixtures["p1_route2"].id,  # From Route 2
@@ -621,7 +654,7 @@ def test_pickup_from_another_route_rejected(
     payload_outbound_wrong = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route2"].id,  # From Route 2
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -641,10 +674,11 @@ def test_different_mode_without_return_pickup_id_rejected(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "DIFFERENT",
         "return_pickup_point_id": None,
@@ -672,10 +706,11 @@ def test_ceo_global_subscription_visibility_and_filters(
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
     # Student subscribes
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
@@ -715,10 +750,11 @@ def test_student_subscription_cancellation_lifecycle(
     other_headers = {"Authorization": f"Bearer {other_token}"}
 
     # Create subscription
+    today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
-        "start_date": "2026-09-01",
+        "start_date": today_str,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }

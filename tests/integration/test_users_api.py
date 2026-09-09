@@ -236,12 +236,12 @@ def test_ceo_can_update_user_status_with_last_ceo_protection(
     assert res_deact_student.status_code == 200
     assert res_deact_student.json()["is_active"] is False
 
-    # Deactivated student cannot login
     res_login = client_with_db.post(
         "/api/v1/auth/login",
         data={"username": "+201000000052", "password": "Password123!"},
     )
-    assert res_login.status_code == 401
+    assert res_login.status_code == 403
+    assert "inactive" in res_login.json()["detail"].lower()
 
 
 def test_rbac_supervisor_cannot_access_user_management(

@@ -1,3 +1,4 @@
+import calendar
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import pytest
@@ -195,8 +196,21 @@ def sub_service(db_session) -> tuple[SubscriptionService, dict]:
 def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     service, e = sub_service
 
+    today = datetime.now(timezone.utc).date()
+    start_d = today
+    # Expected end date for monthly (1 calendar month)
+    m = start_d.month - 1 + 1
+    y = start_d.year + m // 12
+    tm = m % 12 + 1
+    expected_monthly_end = date(y, tm, min(start_d.day, calendar.monthrange(y, tm)[1]))
+
+    # Expected end date for term (3 calendar months)
+    m_term = start_d.month - 1 + 3
+    y_term = start_d.year + m_term // 12
+    tm_term = m_term % 12 + 1
+    expected_term_end = date(y_term, tm_term, min(start_d.day, calendar.monthrange(y_term, tm_term)[1]))
+
     # 1. Successful monthly subscription with same return pickup point
-    start_d = date(2026, 9, 1)
     req = SubscriptionCreateRequest(
         route_id=e["route_1"].id,
         plan_id=e["plan_monthly"].id,
@@ -211,8 +225,7 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     assert sub.id is not None
     assert sub.status == SubscriptionStatus.PENDING
     assert sub.start_date == start_d
-    # 1 calendar month: Sep 1 to Oct 1
-    assert sub.end_date == date(2026, 10, 1)
+    assert sub.end_date == expected_monthly_end
     assert sub.price_snapshot == Decimal("750.00")
     assert sub.outbound_pickup_point_id == e["pickup_r1_a"].id
     assert sub.return_pickup_point_id == e["pickup_r1_a"].id
@@ -270,8 +283,7 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
         ),
     )
     assert sub_diff.return_pickup_point_id == e["pickup_r1_b"].id
-    # 3 calendar months: Sep 1 to Dec 1
-    assert sub_diff.end_date == date(2026, 12, 1)
+    assert sub_diff.end_date == expected_term_end
     assert sub_diff.price_snapshot == Decimal("2000.00")
 
     # 7. Activate subscription and verify QR access
@@ -298,20 +310,26 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
         )
 
     # 10. Daily subscription dates
+    daily_start = today + timedelta(days=15)
     daily_req = SubscriptionCreateRequest(
         route_id=e["route_2"].id,
         plan_id=e["plan_daily"].id,
-        start_date=date(2026, 9, 15),
+        start_date=daily_start,
         outbound_pickup_point_id=e["pickup_r2"].id,
     )
     daily_sub = service.create_subscription(student_id=e["student"].id, data=daily_req)
-    assert daily_sub.start_date == date(2026, 9, 15)
-    assert daily_sub.end_date == date(2026, 9, 15)  # single transportation day
+    assert daily_sub.start_date == daily_start
+    assert daily_sub.end_date == daily_start  # single transportation day
 
 
 def test_subscription_service_daily_monthly_term_date_calculations(sub_service) -> None:
     """Explicitly verify date math for daily, monthly, and term plans across leap and boundary months."""
     service, e = sub_service
+
+    base_year = datetime.now(timezone.utc).year + 1
+    non_leap = base_year
+    while calendar.isleap(non_leap):
+        non_leap += 1
 
     # Daily
     d_sub = service.create_subscription(
@@ -319,27 +337,27 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
         data=SubscriptionCreateRequest(
             route_id=e["route_1"].id,
             plan_id=e["plan_daily"].id,
-            start_date=date(2027, 2, 10),
+            start_date=date(non_leap, 2, 10),
             outbound_pickup_point_id=e["pickup_r1_a"].id,
         ),
     )
-    assert d_sub.start_date == date(2027, 2, 10)
-    assert d_sub.end_date == date(2027, 2, 10)
+    assert d_sub.start_date == date(non_leap, 2, 10)
+    assert d_sub.end_date == date(non_leap, 2, 10)
 
-    # Monthly (Jan 31 -> Feb 28 in non-leap year 2027)
+    # Monthly (Jan 31 -> Feb 28 in non-leap year)
     m_sub = service.create_subscription(
         student_id=e["other_student"].id,
         data=SubscriptionCreateRequest(
             route_id=e["route_2"].id,
             plan_id=e["plan_monthly"].id,
-            start_date=date(2027, 1, 31),
+            start_date=date(non_leap, 1, 31),
             outbound_pickup_point_id=e["pickup_r2"].id,
         ),
     )
-    assert m_sub.start_date == date(2027, 1, 31)
-    assert m_sub.end_date == date(2027, 2, 28)
+    assert m_sub.start_date == date(non_leap, 1, 31)
+    assert m_sub.end_date == date(non_leap, 2, 28)
 
-    # Term (Nov 30 -> Feb 28 in 2026/2027)
+    # Term (Nov 30 -> Feb 28/29)
     # Cancel previous other_student sub first
     service.cancel_subscription(m_sub.id, current_user=e["other_student"])
     t_sub = service.create_subscription(
@@ -347,24 +365,26 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
         data=SubscriptionCreateRequest(
             route_id=e["route_2"].id,
             plan_id=e["plan_term"].id,
-            start_date=date(2026, 11, 30),
+            start_date=date(non_leap, 11, 30),
             outbound_pickup_point_id=e["pickup_r2"].id,
         ),
     )
-    assert t_sub.start_date == date(2026, 11, 30)
-    assert t_sub.end_date == date(2027, 2, 28)
+    assert t_sub.start_date == date(non_leap, 11, 30)
+    expected_term_end = date(non_leap + 1, 2, 29 if calendar.isleap(non_leap + 1) else 28)
+    assert t_sub.end_date == expected_term_end
 
 
 def test_subscription_service_supervisor_and_student_rbac_details(sub_service) -> None:
     """Verify RBAC on get_subscription_detail for student owner, assigned supervisor, and CEO."""
     service, e = sub_service
 
+    today = datetime.now(timezone.utc).date()
     sub = service.create_subscription(
         student_id=e["student"].id,
         data=SubscriptionCreateRequest(
             route_id=e["route_1"].id,
             plan_id=e["plan_daily"].id,
-            start_date=date(2026, 9, 20),
+            start_date=today + timedelta(days=20),
             outbound_pickup_point_id=e["pickup_r1_a"].id,
         ),
     )
@@ -386,12 +406,13 @@ def test_subscription_service_cancel_lifecycle(sub_service) -> None:
     """Verify subscription cancellation behavior for student owner vs non-owner."""
     service, e = sub_service
 
+    today = datetime.now(timezone.utc).date()
     sub = service.create_subscription(
         student_id=e["student"].id,
         data=SubscriptionCreateRequest(
             route_id=e["route_1"].id,
             plan_id=e["plan_daily"].id,
-            start_date=date(2026, 9, 25),
+            start_date=today + timedelta(days=25),
             outbound_pickup_point_id=e["pickup_r1_a"].id,
         ),
     )
