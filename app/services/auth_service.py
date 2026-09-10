@@ -1,6 +1,7 @@
 from app.core.security import (
     create_access_token,
     hash_password,
+    normalize_phone_number,
     verify_password,
 )
 from app.exceptions.base import (
@@ -12,12 +13,10 @@ from app.exceptions.base import (
 )
 from app.models.enums import RoleEnum, UserStatus
 from app.models.user import User
-from app.repositories.otp_repository import OTPRepository
 from app.repositories.university_repository import UniversityRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import TokenResponse
 from app.schemas.user import UserRegisterRequest
-from app.services.whatsapp_service import WhatsAppService, normalize_phone_number
 
 
 class AuthService:
@@ -27,19 +26,14 @@ class AuthService:
         self,
         user_repo: UserRepository,
         university_repo: UniversityRepository | None = None,
-        otp_repo: OTPRepository | None = None,
-        whatsapp_service: WhatsAppService | None = None,
     ) -> None:
         self.user_repo = user_repo
         self.university_repo = university_repo
-        self.otp_repo = otp_repo
-        self.whatsapp_service = whatsapp_service
 
     def register_user(self, data: UserRegisterRequest) -> User:
         """Register a new student account awaiting CEO review and approval.
         
         Account is created with status=PENDING and role=STUDENT.
-        No WhatsApp OTP is generated or sent.
         """
         normalized_phone = normalize_phone_number(data.phone_number)
 
@@ -86,7 +80,6 @@ class AuthService:
             faculty=data.faculty,
             academic_year=data.academic_year,
             university_id_card_image=data.university_id_card_image,
-            is_phone_verified=False,
         )
 
         return user
@@ -115,7 +108,7 @@ class AuthService:
         if user.status == UserStatus.INACTIVE or not user.is_active:
             raise ForbiddenError("Account is inactive.")
 
-        if user.status != UserStatus.ACTIVE:
+        if user.status != UserStatus.APPROVED:
             raise ForbiddenError("Account is not active.")
 
         return user

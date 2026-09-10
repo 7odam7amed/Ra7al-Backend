@@ -99,8 +99,8 @@
         "tags": [
           "Auth"
         ],
-        "summary": "Register a new student account",
-        "description": "Public registration endpoint. Creates an unverified student account and dispatches WhatsApp OTP.",
+        "summary": "Register a new student account (pending CEO approval)",
+        "description": "Public registration endpoint. Creates a student account with status PENDING awaiting CEO approval.",
         "operationId": "register_api_v1_auth_register_post",
         "requestBody": {
           "content": {
@@ -118,91 +118,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/auth/verify-otp": {
-      "post": {
-        "tags": [
-          "Auth"
-        ],
-        "summary": "Verify WhatsApp OTP code to activate account",
-        "description": "Submit received WhatsApp OTP code to verify student phone number.",
-        "operationId": "verify_otp_api_v1_auth_verify_otp_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/VerifyOTPRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OTPResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/auth/resend-otp": {
-      "post": {
-        "tags": [
-          "Auth"
-        ],
-        "summary": "Resend WhatsApp OTP verification code",
-        "description": "Trigger generation and WhatsApp dispatch of a new OTP verification code.",
-        "operationId": "resend_otp_api_v1_auth_resend_otp_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResendOTPRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OTPResponse"
+                  "$ref": "#/components/schemas/UserRegisterResponse"
                 }
               }
             }
@@ -295,7 +211,7 @@
           "Users"
         ],
         "summary": "List all users with pagination and filters (CEO only)",
-        "description": "List users in the system with optional role/status filters.",
+        "description": "List users in the system with optional role/status/is_active filters.",
         "operationId": "list_users_api_v1_users_get",
         "security": [
           {
@@ -365,6 +281,24 @@
               "title": "Is Active"
             },
             "description": "Filter by active status"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UserStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user lifecycle status",
+              "title": "Status"
+            },
+            "description": "Filter by user lifecycle status"
           }
         ],
         "responses": {
@@ -436,6 +370,72 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      }
+    },
+    "/api/v1/users/pending": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "List pending users awaiting CEO approval (CEO only)",
+        "description": "List pending users awaiting review and approval.",
+        "operationId": "list_pending_users_api_v1_users_pending_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Page Size"
+            },
+            "description": "Items per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedUserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/users/{user_id}": {
@@ -589,6 +589,62 @@
       }
     },
     "/api/v1/users/{user_id}/role": {
+      "put": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Update user role (CEO only)",
+        "description": "Change a user's role. Enforces CEO safety protections.",
+        "operationId": "update_user_role_api_v1_users__user_id__role_put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRoleUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "Users"
@@ -676,6 +732,337 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/UserStatusUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}/approve": {
+      "put": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Approve a pending student account (CEO only)",
+        "description": "Approve a pending student account. Status transitions PENDING -> APPROVED.",
+        "operationId": "approve_user_api_v1_users__user_id__approve_put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Approve a pending student account (CEO only)",
+        "description": "Approve a pending student account. Status transitions PENDING -> APPROVED.",
+        "operationId": "approve_user_api_v1_users__user_id__approve_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Approve a pending student account (CEO only)",
+        "description": "Approve a pending student account. Status transitions PENDING -> APPROVED.",
+        "operationId": "approve_user_api_v1_users__user_id__approve_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}/reject": {
+      "put": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Reject a pending student account (CEO only)",
+        "description": "Reject a pending student account. Status transitions PENDING -> REJECTED.",
+        "operationId": "reject_user_api_v1_users__user_id__reject_put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UserRejectRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Data"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Reject a pending student account (CEO only)",
+        "description": "Reject a pending student account. Status transitions PENDING -> REJECTED.",
+        "operationId": "reject_user_api_v1_users__user_id__reject_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UserRejectRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Data"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Reject a pending student account (CEO only)",
+        "description": "Reject a pending student account. Status transitions PENDING -> REJECTED.",
+        "operationId": "reject_user_api_v1_users__user_id__reject_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UserRejectRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Data"
               }
             }
           }
@@ -6209,33 +6596,6 @@
         ],
         "title": "HealthResponse"
       },
-      "OTPResponse": {
-        "properties": {
-          "message": {
-            "type": "string",
-            "title": "Message",
-            "description": "Operation feedback message"
-          },
-          "phone_number": {
-            "type": "string",
-            "title": "Phone Number",
-            "description": "Target normalized phone number"
-          },
-          "is_phone_verified": {
-            "type": "boolean",
-            "title": "Is Phone Verified",
-            "description": "Verification status",
-            "default": false
-          }
-        },
-        "type": "object",
-        "required": [
-          "message",
-          "phone_number"
-        ],
-        "title": "OTPResponse",
-        "description": "Schema for OTP operation responses."
-      },
       "PaginatedAvailableTripResponse": {
         "properties": {
           "items": {
@@ -7132,24 +7492,6 @@
         "type": "object",
         "title": "PickupPointUpdateRequest",
         "description": "Schema for updating a pickup point."
-      },
-      "ResendOTPRequest": {
-        "properties": {
-          "phone_number": {
-            "type": "string",
-            "title": "Phone Number",
-            "description": "User registered phone number",
-            "examples": [
-              "+201012345678"
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "phone_number"
-        ],
-        "title": "ResendOTPRequest",
-        "description": "Schema for requesting a new OTP verification code."
       },
       "ReservationCreateRequest": {
         "properties": {
@@ -9471,6 +9813,143 @@
         "title": "UserRegisterRequest",
         "description": "Schema for public user registration (students only)."
       },
+      "UserRegisterResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name"
+          },
+          "phone_number": {
+            "type": "string",
+            "title": "Phone Number"
+          },
+          "gender": {
+            "$ref": "#/components/schemas/GenderEnum"
+          },
+          "role": {
+            "$ref": "#/components/schemas/RoleEnum"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus",
+            "default": "PENDING"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "university_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "University Id"
+          },
+          "faculty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Faculty"
+          },
+          "academic_year": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Academic Year"
+          },
+          "university_id_card_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "University Id Card Image"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Informational message about the account lifecycle state",
+            "default": "Registration submitted. Your account is pending CEO approval."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "full_name",
+          "phone_number",
+          "gender",
+          "role",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UserRegisterResponse",
+        "description": "Safe user representation returned upon student registration awaiting CEO approval."
+      },
+      "UserRejectRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Optional reason explaining why the account registration was rejected",
+            "examples": [
+              "University ID card image is blurred and illegible."
+            ]
+          }
+        },
+        "type": "object",
+        "title": "UserRejectRequest",
+        "description": "Schema for CEO rejecting a pending user registration."
+      },
       "UserResponse": {
         "properties": {
           "id": {
@@ -9491,14 +9970,24 @@
           "role": {
             "$ref": "#/components/schemas/RoleEnum"
           },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus",
+            "default": "PENDING"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
+          },
           "is_active": {
             "type": "boolean",
             "title": "Is Active"
-          },
-          "is_phone_verified": {
-            "type": "boolean",
-            "title": "Is Phone Verified",
-            "default": false
           },
           "university_id": {
             "anyOf": [
@@ -9586,21 +10075,51 @@
         "title": "UserRoleUpdateRequest",
         "description": "Schema for updating a user's role (CEO only)."
       },
+      "UserStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "APPROVED",
+          "REJECTED",
+          "INACTIVE",
+          "APPROVED"
+        ],
+        "title": "UserStatus",
+        "description": "User account lifecycle status."
+      },
       "UserStatusUpdateRequest": {
         "properties": {
           "is_active": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Is Active",
             "examples": [
               true,
               false
             ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "examples": [
+              "APPROVED",
+              "INACTIVE"
+            ]
           }
         },
         "type": "object",
-        "required": [
-          "is_active"
-        ],
         "title": "UserStatusUpdateRequest",
         "description": "Schema for activating or deactivating a user account (CEO only)."
       },
@@ -9724,35 +10243,6 @@
           "type"
         ],
         "title": "ValidationError"
-      },
-      "VerifyOTPRequest": {
-        "properties": {
-          "phone_number": {
-            "type": "string",
-            "title": "Phone Number",
-            "description": "User registered phone number",
-            "examples": [
-              "+201012345678"
-            ]
-          },
-          "otp_code": {
-            "type": "string",
-            "maxLength": 10,
-            "minLength": 4,
-            "title": "Otp Code",
-            "description": "Verification code received via WhatsApp",
-            "examples": [
-              "123456"
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "phone_number",
-          "otp_code"
-        ],
-        "title": "VerifyOTPRequest",
-        "description": "Schema for submitting and validating an OTP verification code."
       }
     },
     "securitySchemes": {

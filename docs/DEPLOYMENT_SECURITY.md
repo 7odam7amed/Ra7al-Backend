@@ -17,14 +17,6 @@ All production environment variables must be injected at runtime through a dedic
 | `RATE_LIMIT_BACKEND` | `string` | Rate limiter store | `redis`. |
 | `TRUSTED_PROXIES` | `string` | Comma-separated trusted reverse proxy IPs | e.g. `10.0.0.1,172.16.0.0/12,127.0.0.1`. |
 | `CORS_ORIGINS` | `string` | Allowed web origins | Comma-separated explicit domains; **no wildcard (`*`)**. |
-| `WHATSAPP_BUSINESS_NUMBER` | `string` | Company WhatsApp business/sender number | Canonical: `+201222775530`. Strictly sender number. |
-| `WHATSAPP_PROVIDER` | `string` | WhatsApp integration provider | `cloud_api` in production; `mock` strictly forbidden in production. |
-| `WHATSAPP_PHONE_NUMBER_ID` | `string` | WhatsApp Cloud API Phone Number ID | Required in production when provider is `cloud_api`. |
-| `WHATSAPP_API_TOKEN` | `string` | Meta Graph API access token | Required in production when provider is `cloud_api`. |
-
-> [!IMPORTANT]
-> **Company WhatsApp Business/Sender Number: `+201222775530`**  
-> The configured WhatsApp business number is the sender. OTP messages are sent FROM this number TO the phone number supplied by the user during registration. Under no circumstances should the sender number be used as the OTP recipient.
 
 ---
 

@@ -162,14 +162,14 @@ def test_ceo_can_update_user_role_with_last_ceo_protection(
 
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Demoting sole CEO must return 422
+    # Changing own role must return 403 Forbidden
     res_demote = client_with_db.patch(
         f"/api/v1/users/{sole_ceo.id}/role",
         json={"role": "STUDENT"},
         headers=headers,
     )
-    assert res_demote.status_code == 422
-    assert "last active ceo" in res_demote.json()["detail"].lower()
+    assert res_demote.status_code == 403
+    assert "cannot change your own role" in res_demote.json()["detail"].lower()
 
     # Promote student to supervisor
     res_promote = client_with_db.patch(

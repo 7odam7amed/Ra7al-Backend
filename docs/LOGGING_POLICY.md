@@ -18,7 +18,7 @@ This policy governs the handling, filtering, and retention of application log da
 
 ### B. STRICTLY FORBIDDEN in Logs
 * **Plaintext Passwords & Password Hashes**
-* **Dynamic OTP Codes & Verification Tokens**
+* **Verification & Auth Secrets / Tokens**
 * **JWT Access & Refresh Tokens** (`Bearer eyJ...`)
 * **Raw QR Tokens** (`ra7al://subscription/...`)
 * **Authorization Headers & Cookie Values**
@@ -35,7 +35,7 @@ Application logs pass through [`SensitiveDataRedactionFilter`](file:///D:/M7moud
 The filter enforces automated regex-based scrubbing:
 * `Bearer eyJ...` -> `Bearer [REDACTED_JWT]`
 * `"password": "..."` -> `"password": "[REDACTED]"`
-* `"otp": "..."` -> `"otp": "[REDACTED_OTP]"`
+* `"secret": "..."` -> `"secret": "[REDACTED]"`
 * `ra7al://subscription/...` -> `ra7al://subscription/[REDACTED_QR]`
 * `postgresql://user:password@host` -> `postgresql://user:[REDACTED]@host`
 

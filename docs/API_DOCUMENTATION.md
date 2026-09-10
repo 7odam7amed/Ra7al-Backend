@@ -12,13 +12,13 @@
 1. [Architecture & Overview](#1-architecture--overview)
 2. [Base URL & Environment Configuration](#2-base-url--environment-configuration)
 3. [Authentication & Security Architecture](#3-authentication--security-architecture)
-4. [WhatsApp OTP & Registration Lifecycle](#4-whatsapp-otp--registration-lifecycle)
+4. [Student Registration & CEO Approval Lifecycle](#4-student-registration--ceo-approval-lifecycle)
 5. [Role-Based Access Control (RBAC) Matrix](#5-role-based-access-control-rbac-matrix)
 6. [Global Error Structure & Response Standards](#6-global-error-structure--response-standards)
 7. [Rate Limiting & Abuse Prevention](#7-rate-limiting--abuse-prevention)
 8. [Complete API Endpoint Inventory](#8-complete-api-endpoint-inventory)
    - [8.1 Health & Diagnostics](#81-health--diagnostics)
-   - [8.2 Authentication & Verification (`/api/v1/auth`)](#82-authentication--verification-apiv1auth)
+   - [8.2 Authentication (`/api/v1/auth`)](#82-authentication-apiv1auth)
    - [8.3 User Management (`/api/v1/users`)](#83-user-management-apiv1users)
    - [8.4 Universities (`/api/v1/universities`)](#84-universities-apiv1universities)
    - [8.5 Fleet & Buses (`/api/v1/buses`)](#85-fleet--buses-apiv1buses)
@@ -40,7 +40,7 @@
 The **Ra7al University Bus Management System** backend is an enterprise-grade RESTful service built with **FastAPI**, **SQLAlchemy ORM**, **Pydantic v2**, and **PostgreSQL**.
 
 It provides core transportation management services:
-- Student registration with university ID verification and dynamic **WhatsApp OTP** verification.
+- Student registration with university ID verification and CEO account approval.
 - Role-based authorization across **Student**, **Supervisor**, and **CEO** user types.
 - Fleet management (buses, stations, routes, intermediate stops, and gathering/pickup points).
 - Scheduled trips with single-seat reservations and multi-ride period transit subscriptions (Daily, Monthly, Term).
@@ -107,18 +107,46 @@ When a token is missing, expired, signed with an invalid key, or refers to a non
 
 ---
 
-## 4. WhatsApp OTP & Registration Lifecycle
+## 4. Student Registration & CEO Approval Lifecycle
 
-Registration enforces dynamic phone number verification through **WhatsApp OTP**. Accounts cannot log in until their phone number has been verified.
+Student accounts require administrative review and approval by the CEO before they are permitted to log in.
 
-### 4.1 Registration & Verification Flowchart
+### 4.1 Lifecycle State Transitions
+
+```
+REGISTER
+  ↓
+PENDING
+  ↓
+CEO APPROVES
+  ↓
+APPROVED + STUDENT
+  ↓
+LOGIN
+  ↓
+JWT
+```
+
+And for rejected accounts:
+
+```
+PENDING
+  ↓
+CEO REJECTS
+  ↓
+REJECTED
+  ↓
+LOGIN DENIED
+```
+
+### 4.2 Registration & CEO Approval Flowchart
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Student as Student (Client)
     participant API as Ra7al Backend API
-    participant WA as WhatsApp Service (Meta Cloud / Mock)
+    actor CEO as CEO (Admin)
     participant DB as PostgreSQL Database
 
     Student->>API: POST /api/v1/auth/upload-id-card (Multipart Image)
@@ -126,45 +154,40 @@ sequenceDiagram
     API-->>Student: 201 Created {"image_path": "uploads/id_cards/<uuid>.png"}
 
     Student->>API: POST /api/v1/auth/register (User details + image_path)
-    API->>DB: Check phone uniqueness & create unverified User (is_phone_verified=False)
-    API->>API: Generate cryptographically secure 6-digit OTP
-    API->>DB: Invalidate previous OTPs & save HMAC-SHA256 hash (5 min expiry, 5 max attempts)
-    API->>WA: Dispatch WhatsApp template message to user's phone number
-    API-->>Student: 201 Created (UserResponse, is_phone_verified: false)
+    API->>DB: Check phone uniqueness & create User (status=PENDING, role=STUDENT, is_active=False)
+    API-->>Student: 201 Created (status: "PENDING", message: "Registration successful. Your account is pending CEO approval.")
 
-    Student->>API: POST /api/v1/auth/verify-otp (phone_number, otp_code)
-    API->>DB: Fetch active OTP record, verify expiry, verify attempt counter
-    API->>API: Constant-time HMAC-SHA256 comparison
-    alt OTP Valid
-        API->>DB: Mark OTP record is_used=True, update User is_phone_verified=True
-        API-->>Student: 200 OK {"message": "...", "is_phone_verified": true}
-    else OTP Invalid
-        API->>DB: Increment attempt counter (locks at 5 attempts)
-        API-->>Student: 422 Unprocessable Entity {"detail": "Incorrect verification code"}
+    Note over Student,API: Student cannot log in while in PENDING status (returns 403 Forbidden)
+
+    CEO->>API: GET /api/v1/users?status=PENDING
+    API->>DB: Fetch pending users
+    API-->>CEO: 200 OK (PaginatedUserResponse containing pending accounts)
+
+    CEO->>API: GET /api/v1/users/{student_id}/id-card
+    API-->>CEO: 200 OK (Stream student ID card image)
+
+    alt CEO Approves Student
+        CEO->>API: PATCH /api/v1/users/{student_id}/approve
+        API->>DB: Update User (status=APPROVED, is_active=True)
+        API-->>CEO: 200 OK (UserResponse: status="APPROVED", is_active=true)
+        Student->>API: POST /api/v1/auth/login (username=phone, password=pwd)
+        API->>DB: Verify password & assert status == APPROVED and is_active == True
+        API-->>Student: 200 OK {"access_token": "<JWT>", "token_type": "bearer"}
+    else CEO Rejects Student
+        CEO->>API: PATCH /api/v1/users/{student_id}/reject (reason="ID card illegible")
+        API->>DB: Update User (status=REJECTED, rejection_reason="...", is_active=False)
+        API-->>CEO: 200 OK (UserResponse: status="REJECTED", is_active=false)
+        Student->>API: POST /api/v1/auth/login (username=phone, password=pwd)
+        API-->>Student: 403 Forbidden {"detail": "Account has been rejected."}
     end
-
-    opt OTP Resend Needed
-        Student->>API: POST /api/v1/auth/resend-otp (phone_number)
-        API->>API: Enforce 30-second cooldown & 3 req/min rate limit
-        API->>DB: Invalidate old OTPs & store new OTP hash
-        API->>WA: Dispatch new WhatsApp message
-        API-->>Student: 200 OK {"message": "Verification code resent successfully..."}
-    end
-
-    Student->>API: POST /api/v1/auth/login (OAuth2 form: username=phone, password=pwd)
-    API->>DB: Verify Argon2 hash & assert is_phone_verified == True
-    API-->>Student: 200 OK {"access_token": "<JWT>", "token_type": "bearer"}
 ```
 
-### 4.2 Security Rules for OTP & Registration
+### 4.3 Security Rules for Registration & Approval
 1. **E.164 Format**: Phone numbers are normalized strictly to E.164 (e.g., `+201012345678`).
-2. **Anti-Swap Protection**: The API rejects registration or OTP dispatch if the recipient phone equals the configured company WhatsApp business sender number.
-3. **Cryptographic Storage**: Plaintext OTP codes are never stored in the database. Only HMAC-SHA256 digests (`otp_hash`) computed with `JWT_SECRET_KEY` are persisted.
-4. **Single-Use Invariant**: Once verified, the OTP record is atomically marked `is_used = True`.
-5. **Cooldown & Expiry**:
-   - OTP Validity: **5 minutes** (`expires_at`).
-   - Maximum Failed Verification Attempts: **5 attempts** before invalidation.
-   - Resend Cooldown: **30 seconds** minimum interval between resend requests.
+2. **Default Inactive**: All new student registrations default to `status = PENDING`, `role = STUDENT`, and `is_active = false`.
+3. **Login Denial**: Login requests for accounts in `PENDING` or `REJECTED` status or with `is_active = false` are blocked with HTTP 403 Forbidden.
+4. **CEO Authority**: Only authenticated accounts with the `CEO` role may view pending users, approve accounts, reject accounts, or adjust user roles.
+5. **Ownership Protection**: Students can only view/download their own uploaded university ID card; CEOs can inspect any student's ID card for verification.
 
 ---
 
@@ -183,17 +206,20 @@ The system recognizes three roles from `app.models.enums.RoleEnum`:
 | **Health** | `GET /health/db` | ✅ | ✅ | ✅ | ✅ | Open |
 | **Auth** | `POST /api/v1/auth/upload-id-card` | ✅ | ✅ | ✅ | ✅ | Rate limited (10/min) |
 | **Auth** | `POST /api/v1/auth/register` | ✅ | ❌ | ❌ | ❌ | Unauthenticated public registration |
-| **Auth** | `POST /api/v1/auth/verify-otp` | ✅ | ✅ | ✅ | ✅ | Public verification |
-| **Auth** | `POST /api/v1/auth/resend-otp` | ✅ | ✅ | ✅ | ✅ | Public resend (30s cooldown) |
 | **Auth** | `POST /api/v1/auth/login` | ✅ | ✅ | ✅ | ✅ | Public login |
 | **Auth** | `GET /api/v1/auth/me` | ❌ | ✅ | ✅ | ✅ | Authenticated user |
-| **Users** | `GET /api/v1/users` | ❌ | ❌ | ❌ | ✅ | CEO only |
+| **Users** | `GET /api/v1/users` | ❌ | ❌ | ❌ | ✅ | CEO only (supports `?status=PENDING`) |
+| **Users** | `GET /api/v1/users/pending` | ❌ | ❌ | ❌ | ✅ | CEO only (dedicated pending reviews list) |
 | **Users** | `POST /api/v1/users/supervisors` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Users** | `GET /api/v1/users/{user_id}` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Users** | `GET /api/v1/users/{user_id}/id-card` | ❌ | 🔒 | ❌ | ✅ | Self (Owner) or CEO |
 | **Users** | `PATCH /api/v1/users/{user_id}` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Users** | `PATCH /api/v1/users/{user_id}/role` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Users** | `PATCH /api/v1/users/{user_id}/status` | ❌ | ❌ | ❌ | ✅ | CEO only |
+| **Users** | `PATCH /api/v1/users/{user_id}/approve` | ❌ | ❌ | ❌ | ✅ | CEO only |
+| **Users** | `POST /api/v1/users/{user_id}/approve` | ❌ | ❌ | ❌ | ✅ | CEO only |
+| **Users** | `PATCH /api/v1/users/{user_id}/reject` | ❌ | ❌ | ❌ | ✅ | CEO only |
+| **Users** | `POST /api/v1/users/{user_id}/reject` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Universities** | `POST /api/v1/universities` | ❌ | ❌ | ❌ | ✅ | CEO only |
 | **Universities** | `GET /api/v1/universities` | ✅ | ✅ | ✅ | ✅ | Public list for dropdowns |
 | **Universities** | `GET /api/v1/universities/{id}` | ✅ | ✅ | ✅ | ✅ | Public lookup |
@@ -302,15 +328,15 @@ When request bodies, headers, path parameters, or query parameters fail schema v
 
 | Status Code | Meaning | Typical Occurrence |
 |:---|:---|:---|
-| **200 OK** | Success | GET requests, status updates, logins, OTP operations |
+| **200 OK** | Success | GET requests, status updates, logins, approvals |
 | **201 Created** | Resource Created | Registration, creating buses, trips, reservations, subscriptions, file uploads |
 | **204 No Content** | Successful Deletion | DELETE endpoints (buses, universities, stations, routes, stops, trips, pickup points) |
 | **400 Bad Request** | Malformed Input | Invalid request parameters |
-| **401 Unauthorized** | Authentication Missing/Invalid | Missing/expired Bearer token, wrong credentials, unverified phone |
-| **403 Forbidden** | RBAC / Permission Denied | Role unauthorized for endpoint, or access to resource not owned by user |
+| **401 Unauthorized** | Authentication Missing/Invalid | Missing/expired Bearer token, wrong credentials |
+| **403 Forbidden** | RBAC / Pending Approval / Rejected | Role unauthorized, pending CEO approval, rejected account, inactive user |
 | **404 Not Found** | Resource Missing | Entity ID does not exist in database |
 | **409 Conflict** | State Conflict | Phone number already registered, duplicate vehicle or code |
-| **422 Unprocessable** | Business Rule Violation | Invalid model field constraints, expired OTP, exceeded retry attempts, invalid state transition |
+| **422 Unprocessable** | Business Rule Violation | Invalid model field constraints, invalid state transition |
 | **429 Too Many Requests** | Rate Limit Exceeded | Exceeded allowed requests in sliding window (`Retry-After` header returned) |
 | **500 Server Error** | Internal Server Error | Uncaught server exception |
 | **503 Service Unavailable**| Database Connection Failure| Database health check fails (`GET /health/db`) |
@@ -335,8 +361,6 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
 | `POST /api/v1/auth/login` | 5 | 60 | Brute-force protection on credentials |
 | `POST /api/v1/auth/register` | 5 | 60 | Registration flooding prevention |
 | `POST /api/v1/auth/upload-id-card` | 10 | 60 | Disk and compute DoS prevention |
-| `POST /api/v1/auth/verify-otp` | 10 | 60 | OTP enumeration prevention (+ 5 attempts per OTP) |
-| `POST /api/v1/auth/resend-otp` | 3 | 60 | WhatsApp API cost & spam protection (+ 30s cooldown) |
 | `POST /api/v1/boarding/scan` | 60 | 60 | High-throughput supervisor scanning allowance |
 
 ---
@@ -390,7 +414,7 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
 
 #### `POST /api/v1/auth/register`
 - **Operation ID**: `register_api_v1_auth_register_post`
-- **Summary**: Register a new student account and dispatch WhatsApp OTP
+- **Summary**: Register a new student account awaiting CEO approval
 - **Auth**: Public (Rate limit: 5/min)
 - **Request Body (`UserRegisterRequest`)**:
 ```json
@@ -405,7 +429,7 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "university_id_card_image": "uploads/id_cards/e6b22c2a04ec47189c4456910609f3e4.png"
 }
 ```
-- **Response (201 Created - `UserResponse`)**:
+- **Response (201 Created - `UserRegisterResponse`)**:
 ```json
 {
   "id": 15,
@@ -413,58 +437,19 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "phone_number": "+201012345678",
   "gender": "MALE",
   "role": "STUDENT",
-  "is_active": true,
-  "is_phone_verified": false,
+  "status": "PENDING",
+  "rejection_reason": null,
+  "is_active": false,
   "university_id": 1,
   "faculty": "Faculty of Engineering",
   "academic_year": "3rd Year",
   "university_id_card_image": "uploads/id_cards/e6b22c2a04ec47189c4456910609f3e4.png",
   "created_at": "2026-08-31T12:00:00Z",
-  "updated_at": "2026-08-31T12:00:00Z"
+  "updated_at": "2026-08-31T12:00:00Z",
+  "message": "Registration submitted. Your account is pending CEO approval."
 }
 ```
 - **Errors**: `404` (University not found), `409` (Phone already registered), `422` (Validation error / Inactive university).
-
-#### `POST /api/v1/auth/verify-otp`
-- **Operation ID**: `verify_otp_api_v1_auth_verify_otp_post`
-- **Summary**: Verify received WhatsApp OTP code
-- **Auth**: Public (Rate limit: 10/min)
-- **Request Body (`VerifyOTPRequest`)**:
-```json
-{
-  "phone_number": "+201012345678",
-  "otp_code": "481920"
-}
-```
-- **Response (200 OK - `OTPResponse`)**:
-```json
-{
-  "message": "Phone number successfully verified. You can now log in.",
-  "phone_number": "+201012345678",
-  "is_phone_verified": true
-}
-```
-- **Errors**: `404` (User not found), `422` (Expired OTP, incorrect code, max attempts exceeded).
-
-#### `POST /api/v1/auth/resend-otp`
-- **Operation ID**: `resend_otp_api_v1_auth_resend_otp_post`
-- **Summary**: Resend WhatsApp OTP code
-- **Auth**: Public (Rate limit: 3/min, 30s cooldown)
-- **Request Body (`ResendOTPRequest`)**:
-```json
-{
-  "phone_number": "+201012345678"
-}
-```
-- **Response (200 OK - `OTPResponse`)**:
-```json
-{
-  "message": "Verification code resent successfully via WhatsApp.",
-  "phone_number": "+201012345678",
-  "is_phone_verified": false
-}
-```
-- **Errors**: `404` (User not found), `422` (Already verified / Cooldown active < 30s).
 
 #### `POST /api/v1/auth/login`
 - **Operation ID**: `login_api_v1_auth_login_post`
@@ -480,7 +465,7 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "token_type": "bearer"
 }
 ```
-- **Errors**: `401` (Incorrect phone/password, user inactive, phone not verified).
+- **Errors**: `401` (Incorrect phone number or password), `403` (Account is pending CEO approval, rejected, or inactive).
 
 #### `GET /api/v1/auth/me`
 - **Operation ID**: `get_me_api_v1_auth_me_get`
@@ -494,8 +479,9 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "phone_number": "+201012345678",
   "gender": "MALE",
   "role": "STUDENT",
+  "status": "APPROVED",
+  "rejection_reason": null,
   "is_active": true,
-  "is_phone_verified": true,
   "university_id": 1,
   "faculty": "Faculty of Engineering",
   "academic_year": "3rd Year",
@@ -518,6 +504,7 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   - `page_size`: `int` (default: 20, ge: 1, le: 100)
   - `role`: `RoleEnum` (optional: `STUDENT`, `SUPERVISOR`, `CEO`)
   - `is_active`: `bool` (optional)
+  - `status`: `UserStatus` (optional: `PENDING`, `APPROVED`, `REJECTED`, `INACTIVE` — pass `status=PENDING` to list pending student registrations awaiting CEO review)
 - **Response (200 OK - `PaginatedUserResponse`)**:
 ```json
 {
@@ -528,8 +515,9 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
       "phone_number": "+201000000000",
       "gender": "MALE",
       "role": "CEO",
+      "status": "APPROVED",
+      "rejection_reason": null,
       "is_active": true,
-      "is_phone_verified": true,
       "university_id": null,
       "faculty": null,
       "academic_year": null,
@@ -544,6 +532,43 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "total_pages": 1
 }
 ```
+
+#### `GET /api/v1/users/pending`
+- **Operation ID**: `list_pending_users_api_v1_users_pending_get`
+- **Summary**: List pending users awaiting CEO approval (CEO only)
+- **Auth**: Bearer JWT (`CEO` only)
+- **Query Parameters**:
+  - `page`: `int` (default: 1, ge: 1)
+  - `page_size`: `int` (default: 20, ge: 1, le: 100)
+- **Description**: Dedicated endpoint returning a paginated list of accounts with `status = PENDING` awaiting administrative approval.
+- **Response (200 OK - `PaginatedUserResponse`)**:
+```json
+{
+  "items": [
+    {
+      "id": 15,
+      "full_name": "Ahmed Ali",
+      "phone_number": "+201012345678",
+      "gender": "MALE",
+      "role": "STUDENT",
+      "status": "PENDING",
+      "rejection_reason": null,
+      "is_active": false,
+      "university_id": 1,
+      "faculty": "Faculty of Engineering",
+      "academic_year": "3rd Year",
+      "university_id_card_image": "uploads/id_cards/e6b22c2a04ec47189c4456910609f3e4.png",
+      "created_at": "2026-08-31T12:00:00Z",
+      "updated_at": "2026-08-31T12:00:00Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 1
+}
+```
+- **Errors**: `401` (Unauthorized), `403` (Forbidden if not CEO).
 
 #### `POST /api/v1/users/supervisors`
 - **Operation ID**: `create_supervisor_api_v1_users_supervisors_post`
@@ -566,8 +591,9 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
   "phone_number": "+201098765432",
   "gender": "FEMALE",
   "role": "SUPERVISOR",
+  "status": "APPROVED",
+  "rejection_reason": null,
   "is_active": true,
-  "is_phone_verified": true,
   "university_id": null,
   "faculty": null,
   "academic_year": null,
@@ -627,6 +653,68 @@ When a client is throttled, the API returns **HTTP 429 Too Many Requests** with 
 }
 ```
 - **Response (200 OK - `UserResponse`)**
+
+#### `PATCH /api/v1/users/{user_id}/approve` & `POST /api/v1/users/{user_id}/approve`
+- **Operation ID**: `approve_user_api_v1_users__user_id__approve_patch` / `approve_user_api_v1_users__user_id__approve_post`
+- **Summary**: Approve a pending student account (CEO only)
+- **Auth**: Bearer JWT (`CEO` only)
+- **Path Parameters**:
+  - `user_id`: `int` (The user ID of the pending student)
+- **Description**: Transitions account lifecycle status from `PENDING` to `APPROVED`, sets `is_active` to `true`, and clears any previous rejection reason. After approval, the student is permitted to log in via `/api/v1/auth/login`.
+- **Response (200 OK - `UserResponse`)**:
+```json
+{
+  "id": 15,
+  "full_name": "Ahmed Ali",
+  "phone_number": "+201012345678",
+  "gender": "MALE",
+  "role": "STUDENT",
+  "status": "APPROVED",
+  "rejection_reason": null,
+  "is_active": true,
+  "university_id": 1,
+  "faculty": "Faculty of Engineering",
+  "academic_year": "3rd Year",
+  "university_id_card_image": "uploads/id_cards/e6b22c2a04ec47189c4456910609f3e4.png",
+  "created_at": "2026-08-31T12:00:00Z",
+  "updated_at": "2026-08-31T12:30:00Z"
+}
+```
+- **Errors**: `403` (Non-CEO or self-approval attempt), `404` (User not found), `422` (Cannot approve an already rejected account).
+
+#### `PATCH /api/v1/users/{user_id}/reject` & `POST /api/v1/users/{user_id}/reject`
+- **Operation ID**: `reject_user_api_v1_users__user_id__reject_patch` / `reject_user_api_v1_users__user_id__reject_post`
+- **Summary**: Reject a pending student account (CEO only)
+- **Auth**: Bearer JWT (`CEO` only)
+- **Path Parameters**:
+  - `user_id`: `int` (The user ID of the pending student)
+- **Request Body (`UserRejectRequest` - Optional)**:
+```json
+{
+  "reason": "University ID card image is blurred and illegible."
+}
+```
+- **Description**: Transitions account lifecycle status from `PENDING` to `REJECTED`, sets `is_active` to `false`, and records the optional rejection reason. Login attempts by rejected users will be blocked with HTTP 403 Forbidden.
+- **Response (200 OK - `UserResponse`)**:
+```json
+{
+  "id": 15,
+  "full_name": "Ahmed Ali",
+  "phone_number": "+201012345678",
+  "gender": "MALE",
+  "role": "STUDENT",
+  "status": "REJECTED",
+  "rejection_reason": "University ID card image is blurred and illegible.",
+  "is_active": false,
+  "university_id": 1,
+  "faculty": "Faculty of Engineering",
+  "academic_year": "3rd Year",
+  "university_id_card_image": "uploads/id_cards/e6b22c2a04ec47189c4456910609f3e4.png",
+  "created_at": "2026-08-31T12:00:00Z",
+  "updated_at": "2026-08-31T12:35:00Z"
+}
+```
+- **Errors**: `403` (Non-CEO or self-rejection attempt), `404` (User not found), `422` (Cannot reject an already approved account).
 
 ---
 
@@ -1475,7 +1563,7 @@ api.interceptors.response.use(
 export default api;
 ```
 
-### 9.2 Step-by-Step Student Registration & OTP Verification Flow
+### 9.2 Step-by-Step Student Registration & CEO Approval Flow
 
 1. **Upload University ID Card**:
    ```javascript
@@ -1500,15 +1588,19 @@ export default api;
      academic_year: "3rd Year",
      university_id_card_image: imagePath
    });
-   // Prompt student to check their WhatsApp for the 6-digit OTP
+   // userRes.status is "PENDING", is_active is false
+   // User must wait for CEO review and approval before login is permitted.
    ```
 
-3. **Verify WhatsApp OTP**:
+3. **CEO Review & Approval (Administrative)**:
    ```javascript
-   await api.post('/auth/verify-otp', {
-     phone_number: phoneNumber,
-     otp_code: otpCode // 6-digit string
-   });
+   // 1. CEO lists pending user registrations:
+   const { data: pendingUsers } = await api.get('/users?status=PENDING');
+
+   // 2. CEO approves the student:
+   await api.patch(`/users/${studentId}/approve`);
+   // Account status is now "APPROVED", is_active is true.
+   // (If rejecting: await api.patch(`/users/${studentId}/reject`, { reason: "ID blurred" });)
    ```
 
 4. **Login & Store Token**:
@@ -1529,6 +1621,7 @@ export default api;
    ```javascript
    const { data: profile } = await api.get('/auth/me');
    console.log('User Role:', profile.role); // "STUDENT", "SUPERVISOR", "CEO"
+   console.log('User Status:', profile.status); // "APPROVED"
    ```
 
 ### 9.3 Handling Validation Errors (HTTP 422)
@@ -1555,7 +1648,7 @@ function extractFormErrors(errorResponse) {
 |:---|:---:|:---:|:---:|:---:|:---|
 | **Health Checks** | YES | YES | YES | YES | `/health`, `/health/db` |
 | **Authentication & Tokens** | YES | YES | YES | YES | Login, Me, Token generation/decoding |
-| **WhatsApp OTP Verification** | YES | YES | YES | YES | Register, Verify, Resend, Rate limits, Hash security |
+| **User Approval & Admin** | YES | YES | YES | YES | Registration (PENDING), CEO Approval/Rejection, Supervisor creation, Role & Status management |
 | **User & Supervisor Admin** | YES | YES | YES | YES | List, Create supervisor, Role, Status, ID card view |
 | **Universities** | YES | YES | YES | YES | Full CRUD |
 | **Fleet & Buses** | YES | YES | YES | YES | Full CRUD + Status management |

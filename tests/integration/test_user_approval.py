@@ -178,7 +178,7 @@ def test_ceo_approval_lifecycle_and_student_role(
     )
     assert approve_res.status_code == 200
     approved_data = approve_res.json()
-    assert approved_data["status"] == "ACTIVE"
+    assert approved_data["status"] == "APPROVED"
     assert approved_data["is_active"] is True
     assert approved_data["role"] == "STUDENT"
 
@@ -392,6 +392,217 @@ def test_cannot_reject_already_active_user(
     assert "cannot reject an already active user" in res.json()["detail"].lower()
 
 
+def test_ceo_lists_pending_users_endpoint(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """CEO can access GET /api/v1/users/pending while non-CEO roles get 403."""
+    _, ceo_token = _create_user(
+        db_session,
+        phone_number="+201000000333",
+        role=RoleEnum.CEO,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    student, student_token = _create_user(
+        db_session,
+        phone_number="+201011113333",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    _, supervisor_token = _create_user(
+        db_session,
+        phone_number="+201022223333",
+        role=RoleEnum.SUPERVISOR,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    pending_user, _ = _create_user(
+        db_session,
+        phone_number="+201044443333",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.PENDING,
+        is_active=False,
+    )
+
+    ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
+    student_headers = {"Authorization": f"Bearer {student_token}"}
+    sup_headers = {"Authorization": f"Bearer {supervisor_token}"}
+
+    # Student -> 403
+    assert client_with_db.get("/api/v1/users/pending", headers=student_headers).status_code == 403
+    # Supervisor -> 403
+    assert client_with_db.get("/api/v1/users/pending", headers=sup_headers).status_code == 403
+
+    # CEO -> 200 with pending users
+    res = client_with_db.get("/api/v1/users/pending", headers=ceo_headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["total"] >= 1
+    ids = [u["id"] for u in data["items"]]
+    assert pending_user.id in ids
+    # Ensure all returned users have status PENDING
+    assert all(u["status"] == "PENDING" for u in data["items"])
+
+
+def test_client_cannot_tamper_with_status_or_role_at_registration(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Client sending status=ACTIVE or role=CEO in registration payload is ignored and user remains PENDING STUDENT inactive."""
+    uni = _create_test_university(db_session, "Tamper University")
+    payload = {
+        "full_name": "Attacker",
+        "phone_number": "+201055554444",
+        "password": "Password123!",
+        "gender": "MALE",
+        "university_id": uni.id,
+        "faculty": "Science",
+        "academic_year": "1st Year",
+        "university_id_card_image": "uploads/id_cards/attacker.png",
+        "status": "APPROVED",
+        "role": "CEO",
+        "is_active": True,
+    }
+    response = client_with_db.post("/api/v1/auth/register", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["status"] == "PENDING"
+    assert data["role"] == "STUDENT"
+    assert data["is_active"] is False
+
+    # Check database directly
+    user = db_session.query(User).filter_by(phone_number="+201055554444").first()
+    assert user.status == UserStatus.PENDING
+    assert user.role == RoleEnum.STUDENT
+    assert user.is_active is False
+
+
+def test_user_cannot_change_own_role(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Users cannot change their own role: CEO, SUPERVISOR, STUDENT all receive 403."""
+    sole_ceo, ceo_token = _create_user(
+        db_session,
+        phone_number="+201000000111",
+        role=RoleEnum.CEO,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    supervisor, supervisor_token = _create_user(
+        db_session,
+        phone_number="+201022221111",
+        role=RoleEnum.SUPERVISOR,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    student, student_token = _create_user(
+        db_session,
+        phone_number="+201033331111",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+
+    # CEO changing own role -> 403
+    res_ceo = client_with_db.patch(
+        f"/api/v1/users/{sole_ceo.id}/role",
+        json={"role": "STUDENT"},
+        headers={"Authorization": f"Bearer {ceo_token}"},
+    )
+    assert res_ceo.status_code == 403
+    assert "cannot change your own role" in res_ceo.json()["detail"].lower()
+
+    # Supervisor changing own role -> 403
+    res_sup = client_with_db.patch(
+        f"/api/v1/users/{supervisor.id}/role",
+        json={"role": "STUDENT"},
+        headers={"Authorization": f"Bearer {supervisor_token}"},
+    )
+    assert res_sup.status_code == 403
+
+    # Student changing own role -> 403
+    res_stud = client_with_db.patch(
+        f"/api/v1/users/{student.id}/role",
+        json={"role": "SUPERVISOR"},
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert res_stud.status_code == 403
+
+
+def test_approval_and_rejection_http_methods(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Approval and rejection endpoints support PATCH, POST, and PUT methods."""
+    _, ceo_token = _create_user(
+        db_session,
+        phone_number="+201000000222",
+        role=RoleEnum.CEO,
+        status=UserStatus.ACTIVE,
+        is_active=True,
+    )
+    ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
+
+    # Test POST approve
+    user_post, _ = _create_user(
+        db_session,
+        phone_number="+201044440001",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.PENDING,
+        is_active=False,
+    )
+    res_post = client_with_db.post(
+        f"/api/v1/users/{user_post.id}/approve", headers=ceo_headers
+    )
+    assert res_post.status_code == 200
+    assert res_post.json()["status"] == "APPROVED"
+
+    # Test PUT approve
+    user_put, _ = _create_user(
+        db_session,
+        phone_number="+201044440002",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.PENDING,
+        is_active=False,
+    )
+    res_put = client_with_db.put(
+        f"/api/v1/users/{user_put.id}/approve", headers=ceo_headers
+    )
+    assert res_put.status_code == 200
+    assert res_put.json()["status"] == "APPROVED"
+
+    # Test POST reject
+    user_rej_post, _ = _create_user(
+        db_session,
+        phone_number="+201044440003",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.PENDING,
+        is_active=False,
+    )
+    res_rej_post = client_with_db.post(
+        f"/api/v1/users/{user_rej_post.id}/reject",
+        json={"reason": "Rejected via POST"},
+        headers=ceo_headers,
+    )
+    assert res_rej_post.status_code == 200
+    assert res_rej_post.json()["status"] == "REJECTED"
+
+    # Test PUT reject
+    user_rej_put, _ = _create_user(
+        db_session,
+        phone_number="+201044440004",
+        role=RoleEnum.STUDENT,
+        status=UserStatus.PENDING,
+        is_active=False,
+    )
+    res_rej_put = client_with_db.put(
+        f"/api/v1/users/{user_rej_put.id}/reject",
+        json={"reason": "Rejected via PUT"},
+        headers=ceo_headers,
+    )
+    assert res_rej_put.status_code == 200
+    assert res_rej_put.json()["status"] == "REJECTED"
+
+
 def test_alembic_migration_012_upgrade_and_downgrade() -> None:
     """11. Verify Alembic migration 012 works correctly: applies status column, backfills, and downgrades cleanly."""
     with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
@@ -445,6 +656,50 @@ def test_alembic_migration_012_upgrade_and_downgrade() -> None:
         columns_down = {c["name"]: c for c in inspector_down.get_columns("users")}
         assert "status" not in columns_down
         assert "rejection_reason" not in columns_down
+
+        engine.dispose()
+    finally:
+        if os.path.exists(tmp_db_path):
+            try:
+                os.remove(tmp_db_path)
+            except OSError:
+                pass
+
+
+def test_alembic_migration_013_upgrade_and_downgrade() -> None:
+    """12. Verify Alembic migration 013 works correctly: drops otp_verifications and is_phone_verified, downgrades cleanly."""
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        tmp_db_path = tmp_file.name
+
+    try:
+        sqlite_url = f"sqlite:///{tmp_db_path.replace(os.sep, '/')}"
+        alembic_cfg = Config("alembic.ini")
+        alembic_cfg.set_main_option("sqlalchemy.url", sqlite_url)
+
+        # 1. Upgrade up to revision 012
+        command.upgrade(alembic_cfg, "012_user_status_approval")
+
+        engine = create_engine(sqlite_url)
+        inspector_012 = inspect(engine)
+        assert "otp_verifications" in inspector_012.get_table_names()
+        columns_012 = {c["name"] for c in inspector_012.get_columns("users")}
+        assert "is_phone_verified" in columns_012
+
+        # 2. Upgrade to 013_remove_otp_verification
+        command.upgrade(alembic_cfg, "013_remove_otp_verification")
+
+        inspector_013 = inspect(engine)
+        assert "otp_verifications" not in inspector_013.get_table_names()
+        columns_013 = {c["name"] for c in inspector_013.get_columns("users")}
+        assert "is_phone_verified" not in columns_013
+        assert "status" in columns_013
+
+        # 3. Test downgrade back to 012
+        command.downgrade(alembic_cfg, "012_user_status_approval")
+        inspector_down = inspect(engine)
+        assert "otp_verifications" in inspector_down.get_table_names()
+        columns_down = {c["name"] for c in inspector_down.get_columns("users")}
+        assert "is_phone_verified" in columns_down
 
         engine.dispose()
     finally:

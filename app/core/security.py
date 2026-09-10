@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
-import hashlib
-import hmac
+import re
 import secrets
 from typing import Any
 
@@ -15,20 +14,43 @@ password_hasher = PasswordHash((Argon2Hasher(),))
 
 MIN_PASSWORD_LENGTH = 8
 
-
-def hash_otp(otp_code: str) -> str:
-    """Securely compute HMAC-SHA256 one-way hash for an OTP code."""
-    settings = get_settings()
-    key = settings.JWT_SECRET_KEY.encode("utf-8")
-    return hmac.new(key, otp_code.strip().encode("utf-8"), hashlib.sha256).hexdigest()
+PHONE_E164_REGEX = re.compile(r"^\+[0-9]{7,15}$")
 
 
-def verify_otp_hash(submitted_otp: str, stored_hash: str) -> bool:
-    """Constant-time verification of submitted OTP against stored hash."""
-    if not submitted_otp or not stored_hash:
-        return False
-    computed_hash = hash_otp(submitted_otp)
-    return secrets.compare_digest(computed_hash, stored_hash)
+def normalize_phone_number(phone_number: str) -> str:
+    """Normalize phone number to canonical E.164 format.
+
+    Strips whitespace, hyphens, and parentheses, and ensures a leading '+' sign.
+    """
+    if not phone_number or not isinstance(phone_number, str):
+        raise ValidationError("Phone number cannot be empty or invalid")
+
+    cleaned = (
+        phone_number.strip()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+    if not cleaned:
+        raise ValidationError("Phone number cannot be empty or blank")
+
+    if not cleaned.startswith("+"):
+        cleaned = f"+{cleaned}"
+
+    if not PHONE_E164_REGEX.match(cleaned):
+        raise ValidationError(
+            f"Invalid phone number format: '{phone_number}'. Must match E.164 format (e.g. +201222775530)."
+        )
+
+    return cleaned
+
+
+def mask_phone_number(phone: str) -> str:
+    """Mask phone number for safe logging without exposing full PII."""
+    if not phone or len(phone) < 6:
+        return "***"
+    return f"{phone[:4]}****{phone[-4:]}"
 
 
 

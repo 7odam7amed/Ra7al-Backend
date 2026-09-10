@@ -169,16 +169,14 @@ Configuration is centralized in `app/core/config.py` and driven by environment v
 | Testing       | `testing`        |
 | Production    | `production`     |
 
-## WhatsApp OTP Configuration
+## Account Registration & CEO Approval Flow
 
-| Configuration Variable | Default / Canonical Value | Purpose |
-| :--- | :--- | :--- |
-| `WHATSAPP_BUSINESS_NUMBER` | `+201222775530` | Company WhatsApp Business / Sender number |
-| `WHATSAPP_PROVIDER` | `mock` (dev/test) / `cloud_api` (prod) | WhatsApp integration provider |
-| `WHATSAPP_PHONE_NUMBER_ID` | Secret | Cloud API Phone Number ID (Production) |
-| `WHATSAPP_API_TOKEN` | Secret | Cloud API Bearer Token (Production) |
-
-> **Note:** The configured WhatsApp business number (`+201222775530`) is strictly the sender. OTP messages are sent FROM this number TO the phone number supplied by the user during registration.
+1. Student registers via `/api/v1/auth/register` (created with `status = PENDING`, `role = STUDENT`, `is_active = false`).
+2. Pending students cannot log in until approved.
+3. CEO reviews pending students via `GET /api/v1/users/pending` (or `GET /api/v1/users?status=PENDING`).
+4. CEO approves account via `PATCH /api/v1/users/{user_id}/approve` (transitions to `status = APPROVED`, `is_active = true`).
+5. Approved student logs in normally with JWT access tokens.
+6. CEO may optionally reject an account via `PATCH /api/v1/users/{user_id}/reject` or promote/demote via `PATCH /api/v1/users/{user_id}/role`.
 
 
 ## License

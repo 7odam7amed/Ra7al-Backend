@@ -66,6 +66,32 @@ def create_supervisor(
 
 
 @users_router.get(
+    "/pending",
+    response_model=PaginatedUserResponse,
+    summary="List pending users awaiting CEO approval (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
+def list_pending_users(
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    user_service: UserService = Depends(get_user_service),
+) -> PaginatedUserResponse:
+    """List pending users awaiting review and approval."""
+    users, total = user_service.list_users(
+        page=page,
+        page_size=page_size,
+        status=UserStatus.PENDING,
+    )
+    items = [UserResponse.model_validate(u) for u in users]
+    return PaginatedUserResponse.create(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@users_router.get(
     "/{user_id}",
     response_model=UserResponse,
     summary="Get user details by ID (CEO only)",
@@ -120,13 +146,22 @@ def update_user(
     summary="Update user role (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
+@users_router.put(
+    "/{user_id}/role",
+    response_model=UserResponse,
+    summary="Update user role (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
 def update_user_role(
     user_id: int,
     data: UserRoleUpdateRequest,
+    current_user: User = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Change a user's role. Enforces CEO safety protections."""
-    user = user_service.update_user_role(user_id, data.role)
+    user = user_service.update_user_role(
+        user_id, data.role, current_user=current_user
+    )
     return UserResponse.model_validate(user)
 
 
@@ -160,12 +195,19 @@ def update_user_status(
     summary="Approve a pending student account (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
+@users_router.put(
+    "/{user_id}/approve",
+    response_model=UserResponse,
+    summary="Approve a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
 def approve_user(
     user_id: int,
+    current_user: User = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
-    """Approve a pending student account. Status transitions PENDING -> ACTIVE."""
-    user = user_service.approve_user(user_id)
+    """Approve a pending student account. Status transitions PENDING -> APPROVED."""
+    user = user_service.approve_user(user_id, current_user=current_user)
     return UserResponse.model_validate(user)
 
 
@@ -181,12 +223,21 @@ def approve_user(
     summary="Reject a pending student account (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
+@users_router.put(
+    "/{user_id}/reject",
+    response_model=UserResponse,
+    summary="Reject a pending student account (CEO only)",
+    dependencies=[Depends(CEO_ONLY)],
+)
 def reject_user(
     user_id: int,
     data: UserRejectRequest | None = None,
+    current_user: User = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Reject a pending student account. Status transitions PENDING -> REJECTED."""
     reason = data.reason if data else None
-    user = user_service.reject_user(user_id, reason=reason)
+    user = user_service.reject_user(
+        user_id, reason=reason, current_user=current_user
+    )
     return UserResponse.model_validate(user)

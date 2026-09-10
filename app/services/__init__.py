@@ -12,24 +12,15 @@ from app.services.station_service import StationService
 from app.services.subscription_plan_service import SubscriptionPlanService
 from app.services.subscription_service import SubscriptionService
 from app.services.trip_service import TripService
+from app.core.security import normalize_phone_number
 from app.services.university_service import UniversityService
 from app.services.user_service import UserService
-from app.services.whatsapp_service import (
-    BaseWhatsAppProvider,
-    CloudApiWhatsAppProvider,
-    MockWhatsAppProvider,
-    WhatsAppService,
-    normalize_phone_number,
-)
 
 __all__ = [
     "AuthService",
-    "BaseWhatsAppProvider",
     "BoardingService",
     "BusService",
-    "CloudApiWhatsAppProvider",
     "HealthService",
-    "MockWhatsAppProvider",
     "PaymentService",
     "PickupPointService",
     "ReservationService",
@@ -40,7 +31,6 @@ __all__ = [
     "TripService",
     "UniversityService",
     "UserService",
-    "WhatsAppService",
     "normalize_phone_number",
 ]
 

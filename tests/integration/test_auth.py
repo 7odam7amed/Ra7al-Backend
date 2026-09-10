@@ -29,10 +29,9 @@ def _create_user_with_role(
     is_active: bool = True,
     status: UserStatus | None = None,
     full_name: str = "Test User",
-    is_phone_verified: bool = True,
 ) -> User:
     if status is None:
-        status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
+        status = UserStatus.APPROVED if is_active else UserStatus.INACTIVE
     user = User(
         full_name=full_name,
         phone_number=phone_number,
@@ -41,7 +40,6 @@ def _create_user_with_role(
         role=role,
         status=status,
         is_active=is_active,
-        is_phone_verified=is_phone_verified,
     )
     session.add(user)
     session.commit()
@@ -270,7 +268,7 @@ def test_login_success(client_with_db: TestClient, db_session: Session) -> None:
     # CEO approves the user
     user_service = UserService(UserRepository(db_session))
     approved_user = user_service.approve_user(user_id)
-    assert approved_user.status == UserStatus.ACTIVE
+    assert approved_user.status == UserStatus.APPROVED
 
     # Login succeeds after approval
     response = client_with_db.post("/api/v1/auth/login", data=login_data)
@@ -453,7 +451,6 @@ def test_jwt_generated_correctly_without_sensitive_info(
 def test_get_current_user_me_endpoint_success(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    from app.api.deps import get_whatsapp_service
     uni = _create_test_university(db_session, "Cairo University")
     register_payload = {
         "full_name": "Laila Noor",
@@ -474,7 +471,7 @@ def test_get_current_user_me_endpoint_success(
 
     user_service = UserService(UserRepository(db_session))
     approved_user = user_service.approve_user(user_id)
-    assert approved_user.status == UserStatus.ACTIVE
+    assert approved_user.status == UserStatus.APPROVED
 
     login_resp = client_with_db.post(
         "/api/v1/auth/login",

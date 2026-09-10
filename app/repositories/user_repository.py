@@ -38,17 +38,16 @@ class UserRepository:
         faculty: str | None = None,
         academic_year: str | None = None,
         university_id_card_image: str | None = None,
-        is_phone_verified: bool = False,
         rejection_reason: str | None = None,
     ) -> User:
         """Create and persist a new user record."""
         if status is None and is_active is None:
-            status = UserStatus.ACTIVE
+            status = UserStatus.APPROVED
             is_active = True
         elif status is not None and is_active is None:
-            is_active = status == UserStatus.ACTIVE
+            is_active = status == UserStatus.APPROVED
         elif status is None and is_active is not None:
-            status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
+            status = UserStatus.APPROVED if is_active else UserStatus.INACTIVE
 
         user = User(
             full_name=full_name.strip(),
@@ -64,7 +63,6 @@ class UserRepository:
             university_id_card_image=university_id_card_image.strip()
             if university_id_card_image
             else None,
-            is_phone_verified=is_phone_verified,
             rejection_reason=rejection_reason.strip() if rejection_reason else None,
         )
         self.db.add(user)
@@ -137,11 +135,11 @@ class UserRepository:
         if status is not None:
             user.status = status
             if is_active is None:
-                user.is_active = status == UserStatus.ACTIVE
+                user.is_active = status == UserStatus.APPROVED
         if is_active is not None:
             user.is_active = is_active
             if status is None:
-                user.status = UserStatus.ACTIVE if is_active else UserStatus.INACTIVE
+                user.status = UserStatus.APPROVED if is_active else UserStatus.INACTIVE
         if university_id is not None:
             user.university_id = university_id
         if faculty is not None:
@@ -164,10 +162,10 @@ class UserRepository:
         return user
 
     def approve_user(self, user_id: int) -> User | None:
-        """Approve a user account: set status to ACTIVE, is_active to True, and clear rejection reason."""
+        """Approve a user account: set status to APPROVED, is_active to True, and clear rejection reason."""
         user = self.get_by_id(user_id)
         if user:
-            user.status = UserStatus.ACTIVE
+            user.status = UserStatus.APPROVED
             user.is_active = True
             user.rejection_reason = None
             self.db.commit()
@@ -181,15 +179,6 @@ class UserRepository:
             user.status = UserStatus.REJECTED
             user.is_active = False
             user.rejection_reason = reason.strip() if reason else None
-            self.db.commit()
-            self.db.refresh(user)
-        return user
-
-    def set_phone_verified(self, user_id: int, verified: bool = True) -> User | None:
-        """Update phone verification status for a user."""
-        user = self.get_by_id(user_id)
-        if user:
-            user.is_phone_verified = verified
             self.db.commit()
             self.db.refresh(user)
         return user

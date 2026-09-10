@@ -102,7 +102,7 @@ class UserService:
             password_hash=pwd_hash,
             gender=data.gender,
             role=RoleEnum.SUPERVISOR,
-            status=UserStatus.ACTIVE,
+            status=UserStatus.APPROVED,
             is_active=True,
         )
 
@@ -126,8 +126,16 @@ class UserService:
             academic_year=data.academic_year,
         )
 
-    def update_user_role(self, user_id: int, new_role: RoleEnum) -> User:
+    def update_user_role(
+        self,
+        user_id: int,
+        new_role: RoleEnum,
+        current_user: User | None = None,
+    ) -> User:
         """Update user role with RBAC rules: only STUDENT <-> SUPERVISOR transitions are supported."""
+        if current_user is not None and current_user.id == user_id:
+            raise ForbiddenError("You cannot change your own role")
+
         if new_role not in (RoleEnum.STUDENT, RoleEnum.SUPERVISOR):
             raise ValidationError(
                 f"Role '{new_role.value}' cannot be assigned via this endpoint. Only STUDENT and SUPERVISOR roles are supported."
@@ -147,29 +155,42 @@ class UserService:
 
         return self.user_repo.update(target_user, role=new_role)
 
-    def approve_user(self, user_id: int) -> User:
+    def approve_user(
+        self, user_id: int, current_user: User | None = None
+    ) -> User:
         """Approve a pending student account (CEO only).
         
-        Transitions PENDING -> ACTIVE, keeps role as STUDENT, clears rejection reason.
+        Transitions PENDING -> APPROVED, keeps role as STUDENT, clears rejection reason.
         Cannot approve already rejected users.
         """
+        if current_user is not None and current_user.id == user_id:
+            raise ForbiddenError("You cannot approve your own account")
+
         target_user = self.get_user_by_id(user_id)
         if target_user.status == UserStatus.REJECTED:
             raise ValidationError("Cannot approve a rejected user account")
-        if target_user.status == UserStatus.ACTIVE:
+        if target_user.status == UserStatus.APPROVED:
             return target_user
 
         user = self.user_repo.approve_user(user_id)
         logger.info("CEO approved user id=%s (%s)", user.id, user.phone_number)
         return user
 
-    def reject_user(self, user_id: int, reason: str | None = None) -> User:
+    def reject_user(
+        self,
+        user_id: int,
+        reason: str | None = None,
+        current_user: User | None = None,
+    ) -> User:
         """Reject a user account with optional rejection reason (CEO only).
         
-        Transitions PENDING -> REJECTED. Cannot reject an already active user.
+        Transitions PENDING -> REJECTED. Cannot reject an already approved user.
         """
+        if current_user is not None and current_user.id == user_id:
+            raise ForbiddenError("You cannot reject your own account")
+
         target_user = self.get_user_by_id(user_id)
-        if target_user.status == UserStatus.ACTIVE:
+        if target_user.status == UserStatus.APPROVED:
             raise ValidationError("Cannot reject an already active user account")
 
         user = self.user_repo.reject_user(user_id, reason)
@@ -190,9 +211,9 @@ class UserService:
         target_status = status
 
         if target_status is not None and target_active is None:
-            target_active = target_status == UserStatus.ACTIVE
+            target_active = target_status == UserStatus.APPROVED
         elif target_active is not None and target_status is None:
-            target_status = UserStatus.ACTIVE if target_active else UserStatus.INACTIVE
+            target_status = UserStatus.APPROVED if target_active else UserStatus.INACTIVE
 
         if target_active is None:
             target_active = target_user.is_active

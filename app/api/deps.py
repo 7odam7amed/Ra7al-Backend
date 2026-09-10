@@ -13,7 +13,6 @@ from app.models.enums import RoleEnum, UserStatus
 from app.models.user import User
 from app.repositories.boarding_repository import BoardingRepository
 from app.repositories.bus_repository import BusRepository
-from app.repositories.otp_repository import OTPRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.reservation_repository import ReservationRepository
@@ -40,7 +39,6 @@ from app.services.subscription_service import SubscriptionService
 from app.services.trip_service import TripService
 from app.services.university_service import UniversityService
 from app.services.user_service import UserService
-from app.services.whatsapp_service import WhatsAppService
 
 
 settings = get_settings()
@@ -126,22 +124,6 @@ def get_boarding_repository(
 def get_payment_repository(db: Session = Depends(get_db)) -> PaymentRepository:
     """Dependency returning a PaymentRepository instance."""
     return PaymentRepository(db)
-
-
-def get_otp_repository(db: Session = Depends(get_db)) -> OTPRepository:
-    """Dependency returning an OTPRepository instance."""
-    return OTPRepository(db)
-
-
-_shared_whatsapp_service: WhatsAppService | None = None
-
-
-def get_whatsapp_service() -> WhatsAppService:
-    """Dependency returning a WhatsAppService instance."""
-    global _shared_whatsapp_service
-    if _shared_whatsapp_service is None:
-        _shared_whatsapp_service = WhatsAppService()
-    return _shared_whatsapp_service
 
 
 def get_auth_service(
@@ -340,7 +322,7 @@ def get_current_user(
     if not user:
         raise UnauthorizedError("User does not exist")
 
-    if not user.is_active or user.status != UserStatus.ACTIVE:
+    if not user.is_active or user.status != UserStatus.APPROVED:
         raise UnauthorizedError("User account is inactive")
 
     return user

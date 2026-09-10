@@ -140,7 +140,7 @@ class UserStatusUpdateRequest(BaseModel):
     """Schema for activating or deactivating a user account (CEO only)."""
 
     is_active: bool | None = Field(default=None, examples=[True, False])
-    status: UserStatus | None = Field(default=None, examples=[UserStatus.ACTIVE, UserStatus.INACTIVE])
+    status: UserStatus | None = Field(default=None, examples=[UserStatus.APPROVED, UserStatus.INACTIVE])
 
 
 class UserRejectRequest(BaseModel):
@@ -167,7 +167,6 @@ class UserResponse(BaseModel):
     status: UserStatus = UserStatus.PENDING
     rejection_reason: str | None = None
     is_active: bool
-    is_phone_verified: bool = False
     university_id: int | None = None
     faculty: str | None = None
     academic_year: str | None = None

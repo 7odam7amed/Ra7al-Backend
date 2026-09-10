@@ -22,7 +22,7 @@ PATTERNS_TO_REDACT = [
     # Passwords and sensitive tokens in JSON / query params / key-value format
     (
         re.compile(
-            r'(["\']?(?:password|new_password|old_password|secret|api_token|whatsapp_api_token|auth_token|token)["\']?\s*[:=]\s*["\'])([^"\']+)(["\'])',
+            r'(["\']?(?:password|new_password|old_password|secret|api_token|auth_token|token)["\']?\s*[:=]\s*["\'])([^"\']+)(["\'])',
             re.IGNORECASE,
         ),
         r"\1[REDACTED]\3",
@@ -39,14 +39,6 @@ PATTERNS_TO_REDACT = [
             re.IGNORECASE,
         ),
         r"\1[REDACTED]\3",
-    ),
-    # OTP / Verification codes in JSON / query params / key-value format
-    (
-        re.compile(
-            r'(["\']?(?:otp|otp_code|verification_code)["\']?\s*[:=]\s*["\']?)([0-9a-zA-Z]{4,8})(["\']?)',
-            re.IGNORECASE,
-        ),
-        r"\1[REDACTED_OTP]\3",
     ),
 ]
 

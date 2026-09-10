@@ -6,6 +6,8 @@ from app.core.security import (
     create_access_token,
     decode_access_token,
     hash_password,
+    mask_phone_number,
+    normalize_phone_number,
     validate_password,
     verify_password,
 )
@@ -71,3 +73,26 @@ def test_jwt_invalid_token_raises_error() -> None:
 
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token(invalid_token)
+
+
+def test_phone_number_normalization() -> None:
+    assert normalize_phone_number("+201222775530") == "+201222775530"
+    assert normalize_phone_number("+20 122 277 5530") == "+201222775530"
+    assert normalize_phone_number("+20-122-277-5530") == "+201222775530"
+    assert normalize_phone_number("201222775530") == "+201222775530"
+    assert normalize_phone_number("+20 (101) 234-5678") == "+201012345678"
+
+    with pytest.raises(ValidationError):
+        normalize_phone_number("")
+
+    with pytest.raises(ValidationError):
+        normalize_phone_number("invalid-phone")
+
+    with pytest.raises(ValidationError):
+        normalize_phone_number("123")
+
+
+def test_phone_masking() -> None:
+    assert mask_phone_number("+201012345678") == "+201****5678"
+    assert mask_phone_number("123") == "***"
+    assert mask_phone_number("") == "***"

@@ -13,9 +13,21 @@ class UserStatus(enum.StrEnum):
     """User account lifecycle status."""
 
     PENDING = "PENDING"
-    ACTIVE = "ACTIVE"
+    APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     INACTIVE = "INACTIVE"
+    ACTIVE = "APPROVED"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            val_upper = value.upper()
+            if val_upper == "ACTIVE":
+                return cls.APPROVED
+            for member in cls:
+                if member.value == val_upper:
+                    return member
+        return super()._missing_(value)
 
 
 # Canonical alias for compatibility

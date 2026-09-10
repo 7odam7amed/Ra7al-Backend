@@ -93,12 +93,9 @@ def client_with_db(db_session: Session) -> Generator[TestClient, None, None]:
 
 @pytest.fixture(autouse=True)
 def _reset_settings_cache() -> None:
-    from app.api import deps
-    deps._shared_whatsapp_service = None
     get_settings.cache_clear()
     limiter_store.reset()
     yield
-    deps._shared_whatsapp_service = None
     get_settings.cache_clear()
     limiter_store.reset()
 

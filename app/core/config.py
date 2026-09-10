@@ -62,28 +62,6 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
     ]
 
-    # WhatsApp Business & OTP Configuration
-    WHATSAPP_BUSINESS_NUMBER: str = "+201222775530"
-    WHATSAPP_PROVIDER: Literal["mock", "cloud_api"] = "mock"
-    WHATSAPP_PHONE_NUMBER_ID: str | None = None
-    WHATSAPP_API_TOKEN: str | None = None
-
-    @field_validator("WHATSAPP_BUSINESS_NUMBER")
-    @classmethod
-    def validate_whatsapp_business_number(cls, value: str) -> str:
-        import re
-
-        cleaned = value.strip().replace(" ", "").replace("-", "")
-        if not cleaned:
-            raise ValueError("WHATSAPP_BUSINESS_NUMBER cannot be empty")
-        if not cleaned.startswith("+"):
-            cleaned = f"+{cleaned}"
-        if not re.match(r"^\+[0-9]{7,15}$", cleaned):
-            raise ValueError(
-                "WHATSAPP_BUSINESS_NUMBER must be a valid E.164 phone number format (e.g. +201222775530)"
-            )
-        return cleaned
-
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
@@ -124,13 +102,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Default local PostgreSQL credentials (postgres:postgres@localhost) are forbidden in production"
                 )
-            if self.WHATSAPP_PROVIDER == "mock":
-                raise ValueError("Mock WhatsApp provider is forbidden in production")
-            if self.WHATSAPP_PROVIDER == "cloud_api":
-                if not self.WHATSAPP_PHONE_NUMBER_ID or not self.WHATSAPP_API_TOKEN:
-                    raise ValueError(
-                        "WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_API_TOKEN are required for cloud_api in production"
-                    )
         return self
 
     @property

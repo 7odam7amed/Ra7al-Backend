@@ -36,15 +36,6 @@ def test_qr_token_redaction_in_log_messages() -> None:
     assert "ra7al://subscription/[REDACTED_QR]" in sanitized
 
 
-def test_otp_code_redaction_in_log_messages() -> None:
-    raw_log = 'Dispatched message with {"otp": "839201"} to user'
-    sanitized = redact_sensitive_text(raw_log)
-
-    assert "839201" not in sanitized
-    assert '"otp": "[REDACTED_OTP]"' in sanitized
-
-
-
 def test_database_url_password_redaction() -> None:
     db_url = "postgresql://postgres:super_secret_db_pass@db.internal:5432/bus_system"
     sanitized = redact_sensitive_text(db_url)

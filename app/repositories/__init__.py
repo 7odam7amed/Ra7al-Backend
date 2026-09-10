@@ -2,7 +2,6 @@
 
 from app.repositories.boarding_repository import BoardingRepository
 from app.repositories.bus_repository import BusRepository
-from app.repositories.otp_repository import OTPRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.reservation_repository import ReservationRepository
@@ -20,7 +19,6 @@ from app.repositories.user_repository import UserRepository
 __all__ = [
     "BoardingRepository",
     "BusRepository",
-    "OTPRepository",
     "PaymentRepository",
     "PickupPointRepository",
     "ReservationRepository",

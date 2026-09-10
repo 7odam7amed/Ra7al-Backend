@@ -17,11 +17,11 @@ class User(BaseModel):
 
     def __init__(self, **kwargs):
         if "is_active" in kwargs and "status" not in kwargs:
-            kwargs["status"] = UserStatus.ACTIVE if kwargs["is_active"] else UserStatus.INACTIVE
+            kwargs["status"] = UserStatus.APPROVED if kwargs["is_active"] else UserStatus.INACTIVE
         elif "status" in kwargs and "is_active" not in kwargs:
-            kwargs["is_active"] = kwargs["status"] == UserStatus.ACTIVE
+            kwargs["is_active"] = kwargs["status"] == UserStatus.APPROVED
         elif "status" not in kwargs and "is_active" not in kwargs:
-            kwargs["status"] = UserStatus.ACTIVE
+            kwargs["status"] = UserStatus.APPROVED
             kwargs["is_active"] = True
         super().__init__(**kwargs)
 
@@ -64,9 +64,6 @@ class User(BaseModel):
         String(500), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
-    is_phone_verified: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
 

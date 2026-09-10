@@ -22,7 +22,6 @@ from app.models.enums import (
     UserStatus,
     UserStatusEnum,
 )
-from app.models.otp_verification import OTPVerification
 from app.models.payment import Payment
 from app.models.pickup_point import PickupPoint
 from app.models.reservation import Reservation
@@ -42,7 +41,6 @@ __all__ = [
     "Bus",
     "BusStatus",
     "GenderEnum",
-    "OTPVerification",
     "Payment",
     "PaymentMethod",
     "PaymentMethodEnum",

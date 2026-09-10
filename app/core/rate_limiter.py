@@ -261,7 +261,5 @@ login_rate_limiter = RateLimiter(times=5, seconds=60, key_prefix="login")
 register_rate_limiter = RateLimiter(times=5, seconds=60, key_prefix="register")
 upload_id_card_rate_limiter = RateLimiter(times=10, seconds=60, key_prefix="upload_id_card")
 boarding_scan_rate_limiter = RateLimiter(times=60, seconds=60, key_prefix="boarding_scan")
-resend_otp_rate_limiter = RateLimiter(times=3, seconds=60, key_prefix="resend_otp")
-verify_otp_rate_limiter = RateLimiter(times=10, seconds=60, key_prefix="verify_otp")
 
 
