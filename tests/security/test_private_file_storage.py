@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -116,3 +117,117 @@ def test_missing_id_card_returns_404(client_with_db: TestClient, db_session: Ses
 
     res = client_with_db.get(f"/api/v1/users/{student.id}/id-card", headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 404
+
+
+def test_student_can_get_own_id_card_signed_url(client_with_db: TestClient, db_session: Session) -> None:
+    student, token = _create_user_with_id_card(
+        db_session, "signed_owner@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+
+    mock_service = MagicMock()
+    mock_service.get_signed_url.return_value = "https://example.supabase.co/storage/v1/object/sign/id-cards/id_cards/card.png?token=safe_token"
+
+    with patch("app.services.user_service.get_storage_service", return_value=mock_service):
+        res = client_with_db.get(
+            f"/api/v1/users/{student.id}/id-card/signed-url",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert "url" in data
+        assert "signed_url" in data
+        assert data["expires_in"] == 60
+
+
+def test_ceo_can_get_student_id_card_signed_url(client_with_db: TestClient, db_session: Session) -> None:
+    student, _ = _create_user_with_id_card(
+        db_session, "signed_student@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+    ceo, ceo_token = _create_user_with_id_card(
+        db_session, "signed_ceo@test.edu", RoleEnum.CEO
+    )
+
+    mock_service = MagicMock()
+    mock_service.get_signed_url.return_value = "https://example.supabase.co/storage/v1/object/sign/id-cards/id_cards/card.png?token=ceo_token"
+
+    with patch("app.services.user_service.get_storage_service", return_value=mock_service):
+        res = client_with_db.get(
+            f"/api/v1/users/{student.id}/id-card/signed-url?expires_in=120",
+            headers={"Authorization": f"Bearer {ceo_token}"},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert "url" in data
+        assert data["expires_in"] == 120
+
+
+def test_local_storage_signed_url_endpoint_returns_501(client_with_db: TestClient, db_session: Session) -> None:
+    student, token = _create_user_with_id_card(
+        db_session, "local_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+
+    res = client_with_db.get(
+        f"/api/v1/users/{student.id}/id-card/signed-url",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 501
+    assert "only supported with the supabase storage backend" in res.json()["detail"].lower()
+
+
+def test_unauthorized_student_cannot_get_another_students_signed_url(client_with_db: TestClient, db_session: Session) -> None:
+    student_a, _ = _create_user_with_id_card(
+        db_session, "student_a_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card_a.png"
+    )
+    student_b, token_b = _create_user_with_id_card(
+        db_session, "student_b_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card_b.png"
+    )
+
+    res = client_with_db.get(
+        f"/api/v1/users/{student_a.id}/id-card/signed-url",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert res.status_code == 403
+    assert "another student" in res.json()["detail"].lower()
+
+
+def test_supervisor_cannot_get_student_signed_url(client_with_db: TestClient, db_session: Session) -> None:
+    student, _ = _create_user_with_id_card(
+        db_session, "student_sup_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+    sup, sup_token = _create_user_with_id_card(
+        db_session, "sup_signed_access@test.edu", RoleEnum.SUPERVISOR
+    )
+
+    res = client_with_db.get(
+        f"/api/v1/users/{student.id}/id-card/signed-url",
+        headers={"Authorization": f"Bearer {sup_token}"},
+    )
+    assert res.status_code == 403
+    assert "supervisor" in res.json()["detail"].lower()
+
+
+def test_unauthenticated_signed_url_access_returns_401(client_with_db: TestClient, db_session: Session) -> None:
+    student, _ = _create_user_with_id_card(
+        db_session, "unauth_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+    res = client_with_db.get(f"/api/v1/users/{student.id}/id-card/signed-url")
+    assert res.status_code == 401
+
+
+def test_supabase_backend_signed_url_does_not_leak_service_key(client_with_db: TestClient, db_session: Session) -> None:
+    student, token = _create_user_with_id_card(
+        db_session, "supabase_signed@test.edu", RoleEnum.STUDENT, "uploads/id_cards/card.png"
+    )
+
+    mock_service = MagicMock()
+    mock_service.get_signed_url.return_value = "https://example.supabase.co/storage/v1/object/sign/id-cards/id_cards/card.png?token=safe_token"
+
+    with patch("app.services.user_service.get_storage_service", return_value=mock_service):
+        res = client_with_db.get(
+            f"/api/v1/users/{student.id}/id-card/signed-url",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert res.status_code == 200
+        url = res.json()["url"]
+        assert url.startswith("https://example.supabase.co")
+        assert "service-role" not in url

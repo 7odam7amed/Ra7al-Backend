@@ -211,3 +211,10 @@ class PaginatedUserResponse(BaseModel):
             total_pages=total_pages,
         )
 
+
+class UserIdCardUrlResponse(BaseModel):
+    """Schema for temporary signed ID card access URL."""
+
+    url: str = Field(..., description="Temporary signed access URL for student ID card")
+    signed_url: str = Field(..., description="Temporary signed access URL alias")
+    expires_in: int = Field(default=60, description="Expiration duration in seconds")

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from app.api.deps import CEO_ONLY, get_current_user, get_user_service
 from app.models.enums import RoleEnum, UserStatus
@@ -7,6 +7,7 @@ from app.models.user import User
 from app.schemas.user import (
     PaginatedUserResponse,
     SupervisorCreateRequest,
+    UserIdCardUrlResponse,
     UserRejectRequest,
     UserResponse,
     UserRoleUpdateRequest,
@@ -114,13 +115,40 @@ def get_user_id_card(
     user_id: int,
     current_user: User = Depends(get_current_user),
     user_service: UserService = Depends(get_user_service),
-) -> FileResponse:
+) -> Response:
     """Securely download/view student ID card image with strict ownership enforcement."""
-    file_path, media_type = user_service.get_user_id_card(user_id, current_user)
-    return FileResponse(
-        path=str(file_path),
+    content, media_type = user_service.get_user_id_card(user_id, current_user)
+    return Response(
+        content=content,
         media_type=media_type,
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@users_router.get(
+    "/{user_id}/id-card/signed-url",
+    response_model=UserIdCardUrlResponse,
+    summary="Get temporary signed URL for student ID card (Student owner or CEO only)",
+)
+def get_user_id_card_signed_url(
+    user_id: int,
+    expires_in: int = Query(
+        default=60,
+        ge=1,
+        le=300,
+        description="Signed URL expiry time in seconds (default: 60s, max: 300s)",
+    ),
+    current_user: User = Depends(get_current_user),
+    user_service: UserService = Depends(get_user_service),
+) -> UserIdCardUrlResponse:
+    """Retrieve authorized temporary signed URL for a student's ID card."""
+    signed_url = user_service.get_user_id_card_signed_url(
+        user_id, current_user, expires_in=expires_in
+    )
+    return UserIdCardUrlResponse(
+        url=signed_url,
+        signed_url=signed_url,
+        expires_in=expires_in,
     )
 
 

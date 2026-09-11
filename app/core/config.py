@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     RATE_LIMIT_BACKEND: Literal["memory", "redis"] = "memory"
     REDIS_URL: str | None = None
 
+    # Storage Configuration
+    STORAGE_BACKEND: Literal["local", "supabase"] = "local"
+    SUPABASE_URL: str | None = None
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None
+    SUPABASE_STORAGE_BUCKET: str = "id-cards"
+
     # Trusted Proxies (for secure client IP extraction)
     TRUSTED_PROXIES: Annotated[
         list[str],
@@ -101,6 +107,15 @@ class Settings(BaseSettings):
             if "postgres:postgres" in self.DATABASE_URL or "localhost:5432" in self.DATABASE_URL:
                 raise ValueError(
                     "Default local PostgreSQL credentials (postgres:postgres@localhost) are forbidden in production"
+                )
+        if self.STORAGE_BACKEND == "supabase":
+            if not self.SUPABASE_URL:
+                raise ValueError(
+                    "SUPABASE_URL must be configured when STORAGE_BACKEND is 'supabase'"
+                )
+            if not self.SUPABASE_SERVICE_ROLE_KEY:
+                raise ValueError(
+                    "SUPABASE_SERVICE_ROLE_KEY must be configured when STORAGE_BACKEND is 'supabase'"
                 )
         return self
 

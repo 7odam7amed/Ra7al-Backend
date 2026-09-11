@@ -83,3 +83,31 @@ def test_valid_production_settings_pass() -> None:
     assert settings.DEBUG is False
     assert len(settings.CORS_ORIGINS) == 2
 
+
+def test_production_rejects_supabase_without_credentials() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            APP_ENV="production",
+            DEBUG=False,
+            JWT_SECRET_KEY="a-very-secure-random-production-secret-key-32-chars-long",
+            DATABASE_URL="postgresql://ra7al_admin:StrongPassword123!@db.internal:5432/bus_system",
+            STORAGE_BACKEND="supabase",
+            SUPABASE_URL=None,
+            SUPABASE_SERVICE_ROLE_KEY=None,
+        )
+    assert "supabase_url" in str(exc_info.value).lower()
+
+
+def test_production_accepts_valid_supabase_settings() -> None:
+    settings = Settings(
+        APP_ENV="production",
+        DEBUG=False,
+        JWT_SECRET_KEY="a-very-secure-random-production-secret-key-32-chars-long",
+        DATABASE_URL="postgresql://ra7al_admin:StrongPassword123!@db.internal:5432/bus_system",
+        STORAGE_BACKEND="supabase",
+        SUPABASE_URL="https://project-ref.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy_key",
+        SUPABASE_STORAGE_BUCKET="custom-id-cards",
+    )
+    assert settings.STORAGE_BACKEND == "supabase"
+    assert settings.SUPABASE_STORAGE_BUCKET == "custom-id-cards"

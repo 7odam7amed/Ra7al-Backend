@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from app.core.security import hash_password
+from app.core.storage import StorageService, get_storage_service
 from app.exceptions.base import (
     ConflictError,
     ForbiddenError,
@@ -19,8 +20,19 @@ logger = logging.getLogger(__name__)
 class UserService:
     """Service handling administrative user management, supervisor creation, and RBAC rules."""
 
-    def __init__(self, user_repo: UserRepository) -> None:
+    def __init__(
+        self,
+        user_repo: UserRepository,
+        storage_service: StorageService | None = None,
+    ) -> None:
         self.user_repo = user_repo
+        self._storage_service = storage_service
+
+    @property
+    def storage_service(self) -> StorageService:
+        if self._storage_service is not None:
+            return self._storage_service
+        return get_storage_service()
 
     def list_users(
         self,
@@ -51,10 +63,8 @@ class UserService:
             raise NotFoundError(f"User with ID {user_id} not found")
         return user
 
-    def get_user_id_card(
-        self, user_id: int, current_user: User
-    ) -> tuple[Path, str]:
-        """Retrieve authorized file path and media type for a student's ID card."""
+    def _validate_id_card_access(self, user_id: int, current_user: User) -> str:
+        """Enforce strict RBAC and ownership on student ID card access."""
         if current_user.role == RoleEnum.STUDENT:
             if current_user.id != user_id:
                 raise ForbiddenError("You cannot access another student's ID card")
@@ -71,24 +81,21 @@ class UserService:
         if ".." in rel_path:
             raise ForbiddenError("Invalid file path traversal attempt")
 
-        full_path = (Path.cwd() / rel_path).resolve()
-        uploads_base = (Path.cwd() / "uploads").resolve()
+        return rel_path
 
-        if not str(full_path).startswith(str(uploads_base)):
-            raise ForbiddenError("Access outside upload directory is forbidden")
+    def get_user_id_card(
+        self, user_id: int, current_user: User
+    ) -> tuple[bytes, str]:
+        """Retrieve authorized file bytes and media type for a student's ID card."""
+        rel_path = self._validate_id_card_access(user_id, current_user)
+        return self.storage_service.get_file(rel_path)
 
-        if not full_path.exists() or not full_path.is_file():
-            raise NotFoundError("ID card file not found on disk")
-
-        ext = full_path.suffix.lower()
-        media_type_map = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-        }
-        media_type = media_type_map.get(ext, "application/octet-stream")
-        return full_path, media_type
+    def get_user_id_card_signed_url(
+        self, user_id: int, current_user: User, expires_in: int = 60
+    ) -> str:
+        """Retrieve authorized temporary signed URL for a student's ID card."""
+        rel_path = self._validate_id_card_access(user_id, current_user)
+        return self.storage_service.get_signed_url(rel_path, expires_in=expires_in)
 
     def create_supervisor(self, data: SupervisorCreateRequest) -> User:
         """Create a new supervisor account (CEO action only)."""
@@ -159,7 +166,7 @@ class UserService:
         self, user_id: int, current_user: User | None = None
     ) -> User:
         """Approve a pending student account (CEO only).
-        
+
         Transitions PENDING -> APPROVED, keeps role as STUDENT, clears rejection reason.
         Cannot approve already rejected users.
         """
@@ -183,7 +190,7 @@ class UserService:
         current_user: User | None = None,
     ) -> User:
         """Reject a user account with optional rejection reason (CEO only).
-        
+
         Transitions PENDING -> REJECTED. Cannot reject an already approved user.
         """
         if current_user is not None and current_user.id == user_id:
