@@ -1,4 +1,5 @@
 import io
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
@@ -142,6 +143,85 @@ def test_supabase_storage_save_file(supabase_service: SupabaseStorageService) ->
         assert call_headers["x-upsert"] == "true"
         assert call_headers["Content-Type"] == "image/png"
         assert call_content == PNG_BYTES
+
+
+def test_supabase_storage_save_file_upload_error_logging(
+    supabase_service: SupabaseStorageService,
+) -> None:
+    upload = _create_upload_file("card.png", PNG_BYTES, "image/png")
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 400
+    mock_resp.text = '{"statusCode":"400","error":"Bad Request","message":"Bucket not found"}'
+
+    with patch("app.core.storage.logger.error") as mock_logger:
+        with patch("httpx.Client.post", return_value=mock_resp):
+            with pytest.raises(AppException) as exc_info:
+                supabase_service.save_file(upload)
+            assert exc_info.value.status_code == 500
+            assert exc_info.value.message == "Failed to store file in object storage"
+
+        mock_logger.assert_called_once()
+        log_msg_template = mock_logger.call_args[0][0]
+        log_args = mock_logger.call_args[0][1:]
+        formatted_log = log_msg_template % log_args
+
+        # Verify all required fields in the log message
+        assert "Supabase storage upload failed (request reached Supabase)" in formatted_log
+        assert "status_code=400" in formatted_log
+        assert "bucket=id-cards" in formatted_log
+        assert "object_key=id_cards/" in formatted_log
+        assert "content_type=image/png" in formatted_log
+        assert '{"statusCode":"400","error":"Bad Request","message":"Bucket not found"}' in formatted_log
+
+        # Verify no secrets or sensitive data leaked in logs
+        assert supabase_service.service_role_key not in formatted_log
+        assert "Authorization" not in formatted_log
+        assert "apikey" not in formatted_log
+        assert "fake image bytes" not in formatted_log
+        for arg in log_args:
+            assert supabase_service.service_role_key != arg
+
+
+def test_supabase_storage_save_file_response_body_truncation(
+    supabase_service: SupabaseStorageService,
+) -> None:
+    upload = _create_upload_file("card.png", PNG_BYTES, "image/png")
+
+    long_body = "x" * 2000
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 502
+    mock_resp.text = long_body
+
+    with patch("app.core.storage.logger.error") as mock_logger:
+        with patch("httpx.Client.post", return_value=mock_resp):
+            with pytest.raises(AppException) as exc_info:
+                supabase_service.save_file(upload)
+            assert exc_info.value.status_code == 500
+
+        mock_logger.assert_called_once()
+        formatted_log = mock_logger.call_args[0][0] % mock_logger.call_args[0][1:]
+        assert "status_code=502" in formatted_log
+        assert "x" * 1000 in formatted_log
+        assert "x" * 1001 not in formatted_log
+
+
+def test_supabase_storage_save_file_connection_error(
+    supabase_service: SupabaseStorageService,
+) -> None:
+    upload = _create_upload_file("card.png", PNG_BYTES, "image/png")
+
+    with patch("app.core.storage.logger.error") as mock_logger:
+        with patch("httpx.Client.post", side_effect=httpx.ConnectError("Connection refused")):
+            with pytest.raises(AppException) as exc_info:
+                supabase_service.save_file(upload)
+            assert exc_info.value.status_code == 503
+            assert exc_info.value.message == "Storage service unavailable"
+
+        mock_logger.assert_called_once()
+        formatted_log = mock_logger.call_args[0][0] % mock_logger.call_args[0][1:]
+        assert "Supabase storage connection error: ConnectError" in formatted_log
+        assert supabase_service.service_role_key not in formatted_log
 
 
 def test_supabase_storage_get_file_success(supabase_service: SupabaseStorageService) -> None:

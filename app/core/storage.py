@@ -468,9 +468,13 @@ class SupabaseStorageService(StorageService):
                 resp = client.post(url, headers=headers, content=content)
                 if resp.status_code not in (200, 201):
                     logger.error(
-                        "Supabase storage upload failed: status=%s response=%s",
+                        "Supabase storage upload failed (request reached Supabase): "
+                        "status_code=%s bucket=%s object_key=%s content_type=%s response=%s",
                         resp.status_code,
-                        resp.text[:1000],
+                        self.bucket_name,
+                        object_key,
+                        content_type,
+                        (resp.text or "")[:1000],
                     )
                     raise AppException(
                         "Failed to store file in object storage",
