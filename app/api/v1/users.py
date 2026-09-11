@@ -174,12 +174,6 @@ def update_user(
     summary="Update user role (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
-@users_router.put(
-    "/{user_id}/role",
-    response_model=UserResponse,
-    summary="Update user role (CEO only)",
-    dependencies=[Depends(CEO_ONLY)],
-)
 def update_user_role(
     user_id: int,
     data: UserRoleUpdateRequest,
@@ -217,18 +211,6 @@ def update_user_status(
     summary="Approve a pending student account (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
-@users_router.post(
-    "/{user_id}/approve",
-    response_model=UserResponse,
-    summary="Approve a pending student account (CEO only)",
-    dependencies=[Depends(CEO_ONLY)],
-)
-@users_router.put(
-    "/{user_id}/approve",
-    response_model=UserResponse,
-    summary="Approve a pending student account (CEO only)",
-    dependencies=[Depends(CEO_ONLY)],
-)
 def approve_user(
     user_id: int,
     current_user: User = Depends(get_current_user),
@@ -240,18 +222,6 @@ def approve_user(
 
 
 @users_router.patch(
-    "/{user_id}/reject",
-    response_model=UserResponse,
-    summary="Reject a pending student account (CEO only)",
-    dependencies=[Depends(CEO_ONLY)],
-)
-@users_router.post(
-    "/{user_id}/reject",
-    response_model=UserResponse,
-    summary="Reject a pending student account (CEO only)",
-    dependencies=[Depends(CEO_ONLY)],
-)
-@users_router.put(
     "/{user_id}/reject",
     response_model=UserResponse,
     summary="Reject a pending student account (CEO only)",

@@ -343,13 +343,22 @@ class SupabaseStorageService(StorageService):
         bucket_name: str | None = None,
     ) -> None:
         settings = get_settings()
-        self.supabase_url = (supabase_url or settings.SUPABASE_URL or "").rstrip("/")
-        self.service_role_key = (
-            service_role_key or settings.SUPABASE_SERVICE_ROLE_KEY or ""
-        )
-        self.bucket_name = (
-            bucket_name or settings.SUPABASE_STORAGE_BUCKET or DEFAULT_BUCKET_NAME
-        )
+        if supabase_url is not None:
+            self.supabase_url = supabase_url.rstrip("/")
+        else:
+            self.supabase_url = (settings.SUPABASE_URL or "").rstrip("/")
+
+        if service_role_key is not None:
+            self.service_role_key = service_role_key
+        else:
+            self.service_role_key = settings.SUPABASE_SERVICE_ROLE_KEY or ""
+
+        if bucket_name is not None:
+            self.bucket_name = bucket_name
+        else:
+            self.bucket_name = (
+                settings.SUPABASE_STORAGE_BUCKET or DEFAULT_BUCKET_NAME
+            )
 
         if not self.supabase_url or not self.service_role_key:
             raise ValueError(

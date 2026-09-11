@@ -1,5 +1,7 @@
+import os
+import sys
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -15,15 +17,33 @@ INSECURE_JWT_DEFAULTS = {
 }
 
 
+def _get_default_env_file() -> str | None:
+    """Return .env path in runtime environments; return None during test runs for isolated defaults."""
+    if "ENV_FILE" in os.environ:
+        return os.environ["ENV_FILE"] or None
+    if (
+        "pytest" in sys.modules
+        or os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("APP_ENV") == "testing"
+    ):
+        return None
+    return ".env"
+
+
 class Settings(BaseSettings):
     """Centralized application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_get_default_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if "_env_file" not in kwargs:
+            kwargs["_env_file"] = _get_default_env_file()
+        super().__init__(*args, **kwargs)
 
     APP_NAME: str = "University Bus Management System"
     APP_ENV: Literal["development", "testing", "production"] = "development"

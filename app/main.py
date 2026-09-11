@@ -37,10 +37,20 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    cors_origins = list(settings.CORS_ORIGINS)
+    if not settings.is_production:
+        for dev_origin in (
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+        ):
+            if dev_origin not in cors_origins:
+                cors_origins.append(dev_origin)
+
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

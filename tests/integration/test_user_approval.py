@@ -532,7 +532,7 @@ def test_user_cannot_change_own_role(
 def test_approval_and_rejection_http_methods(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Approval and rejection endpoints support PATCH, POST, and PUT methods."""
+    """Approval and rejection endpoints support only PATCH; POST and PUT return 405."""
     _, ceo_token = _create_user(
         db_session,
         phone_number="+201000000222",
@@ -542,7 +542,7 @@ def test_approval_and_rejection_http_methods(
     )
     ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Test POST approve
+    # Test POST and PUT approve return 405 Method Not Allowed
     user_post, _ = _create_user(
         db_session,
         phone_number="+201044440001",
@@ -553,25 +553,22 @@ def test_approval_and_rejection_http_methods(
     res_post = client_with_db.post(
         f"/api/v1/users/{user_post.id}/approve", headers=ceo_headers
     )
-    assert res_post.status_code == 200
-    assert res_post.json()["status"] == "APPROVED"
+    assert res_post.status_code == 405
 
-    # Test PUT approve
-    user_put, _ = _create_user(
-        db_session,
-        phone_number="+201044440002",
-        role=RoleEnum.STUDENT,
-        status=UserStatus.PENDING,
-        is_active=False,
-    )
     res_put = client_with_db.put(
-        f"/api/v1/users/{user_put.id}/approve", headers=ceo_headers
+        f"/api/v1/users/{user_post.id}/approve", headers=ceo_headers
     )
-    assert res_put.status_code == 200
-    assert res_put.json()["status"] == "APPROVED"
+    assert res_put.status_code == 405
 
-    # Test POST reject
-    user_rej_post, _ = _create_user(
+    # Test PATCH approve succeeds
+    res_patch = client_with_db.patch(
+        f"/api/v1/users/{user_post.id}/approve", headers=ceo_headers
+    )
+    assert res_patch.status_code == 200
+    assert res_patch.json()["status"] == "APPROVED"
+
+    # Test POST and PUT reject return 405 Method Not Allowed
+    user_rej, _ = _create_user(
         db_session,
         phone_number="+201044440003",
         role=RoleEnum.STUDENT,
@@ -579,28 +576,35 @@ def test_approval_and_rejection_http_methods(
         is_active=False,
     )
     res_rej_post = client_with_db.post(
-        f"/api/v1/users/{user_rej_post.id}/reject",
+        f"/api/v1/users/{user_rej.id}/reject",
         json={"reason": "Rejected via POST"},
         headers=ceo_headers,
     )
-    assert res_rej_post.status_code == 200
-    assert res_rej_post.json()["status"] == "REJECTED"
+    assert res_rej_post.status_code == 405
 
-    # Test PUT reject
-    user_rej_put, _ = _create_user(
-        db_session,
-        phone_number="+201044440004",
-        role=RoleEnum.STUDENT,
-        status=UserStatus.PENDING,
-        is_active=False,
-    )
     res_rej_put = client_with_db.put(
-        f"/api/v1/users/{user_rej_put.id}/reject",
+        f"/api/v1/users/{user_rej.id}/reject",
         json={"reason": "Rejected via PUT"},
         headers=ceo_headers,
     )
-    assert res_rej_put.status_code == 200
-    assert res_rej_put.json()["status"] == "REJECTED"
+    assert res_rej_put.status_code == 405
+
+    # Test PATCH reject succeeds
+    res_rej_patch = client_with_db.patch(
+        f"/api/v1/users/{user_rej.id}/reject",
+        json={"reason": "Rejected via PATCH"},
+        headers=ceo_headers,
+    )
+    assert res_rej_patch.status_code == 200
+    assert res_rej_patch.json()["status"] == "REJECTED"
+
+    # Test PUT role returns 405 Method Not Allowed
+    res_role_put = client_with_db.put(
+        f"/api/v1/users/{user_post.id}/role",
+        json={"role": "SUPERVISOR"},
+        headers=ceo_headers,
+    )
+    assert res_role_put.status_code == 405
 
 
 def test_alembic_migration_012_upgrade_and_downgrade() -> None:
