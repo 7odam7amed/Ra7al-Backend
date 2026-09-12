@@ -126,6 +126,16 @@ pytest -v
 
 Integration tests are skipped automatically when PostgreSQL is unavailable.
 
+> **Git Bash / MSYS2 note (Windows):** MSYS2 path conversion can rewrite values of
+> environment variables that look like Unix paths before native processes receive them
+> (e.g. `API_V1_PREFIX=/api/v1` may reach Python as `C:/Program Files/Git/api/v1`).
+> If pytest fails at collection with `AssertionError: A path prefix must start with '/'`,
+> run the suite with path conversion disabled — the `.env` file itself needs no change:
+>
+> ```bash
+> MSYS_NO_PATHCONV=1 pytest -q
+> ```
+
 ## API Documentation
 
 When the application is running:

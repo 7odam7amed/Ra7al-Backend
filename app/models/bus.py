@@ -22,6 +22,9 @@ class Bus(BaseModel):
     capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Storage reference (not raw binary) for the bus image; served through the
+    # storage service so private buckets never expose credentials.
+    image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[BusStatus] = mapped_column(
         Enum(
             BusStatus,

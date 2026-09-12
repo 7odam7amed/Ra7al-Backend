@@ -44,6 +44,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             data=SubscriptionPlanCreate(
                 name="Monthly Pass",
                 plan_type=SubscriptionPlanType.MONTHLY,
+                duration_days=30,
                 price=Decimal("750.00"),
             ),
         )
@@ -55,16 +56,18 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             data=SubscriptionPlanCreate(
                 name="Free Pass",
                 plan_type=SubscriptionPlanType.MONTHLY,
+                duration_days=30,
                 price=Decimal("0.00"),
             ),
         )
 
-    # Valid creation with default durations
+    # Valid creation with CEO-defined durations
     daily_plan = service.create_plan(
         current_user=ceo_user,
         data=SubscriptionPlanCreate(
             name="Daily Ticket",
             plan_type=SubscriptionPlanType.DAILY,
+            duration_days=1,
             price=Decimal("40.00"),
         ),
     )
@@ -76,20 +79,60 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
         data=SubscriptionPlanCreate(
             name="Monthly Pass",
             plan_type=SubscriptionPlanType.MONTHLY,
+            duration_days=30,
             price=Decimal("800.00"),
         ),
     )
     assert monthly_plan.duration_days == 30
+
+    # A second, differently-priced monthly package with custom duration is allowed
+    monthly_extended = service.create_plan(
+        current_user=ceo_user,
+        data=SubscriptionPlanCreate(
+            name="Monthly Extended",
+            plan_type=SubscriptionPlanType.MONTHLY,
+            duration_days=45,
+            price=Decimal("1000.00"),
+        ),
+    )
+    assert monthly_extended.duration_days == 45
+
+    # A weekly package
+    weekly_plan = service.create_plan(
+        current_user=ceo_user,
+        data=SubscriptionPlanCreate(
+            name="Weekly Pass",
+            plan_type=SubscriptionPlanType.WEEKLY,
+            duration_days=7,
+            price=Decimal("150.00"),
+        ),
+    )
+    assert weekly_plan.duration_days == 7
 
     term_plan = service.create_plan(
         current_user=ceo_user,
         data=SubscriptionPlanCreate(
             name="Term Pass",
             plan_type=SubscriptionPlanType.TERM,
+            duration_days=120,
             price=Decimal("2100.00"),
         ),
     )
-    assert term_plan.duration_days == 90
+    assert term_plan.duration_days == 120
+
+    # Exact duplicate package is rejected
+    from app.exceptions.base import ConflictError
+
+    with pytest.raises(ConflictError):
+        service.create_plan(
+            current_user=ceo_user,
+            data=SubscriptionPlanCreate(
+                name="Weekly Pass",
+                plan_type=SubscriptionPlanType.WEEKLY,
+                duration_days=7,
+                price=Decimal("999.00"),
+            ),
+        )
 
     # Non-CEO cannot update
     with pytest.raises(ForbiddenError):
@@ -123,13 +166,13 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
     )
     assert deactivated.is_active is False
 
-    # Listing: student only sees active plans
+    # Listing: student only sees active plans (the daily plan was deactivated above)
     plans_student, count_student = service.list_all_plans(
         current_user=student_user
     )
-    assert count_student == 2
+    assert count_student == 4
     assert all(p.is_active for p in plans_student)
 
     # CEO sees all
     plans_ceo, count_ceo = service.list_all_plans(current_user=ceo_user)
-    assert count_ceo == 3
+    assert count_ceo == 5

@@ -57,6 +57,16 @@ MEDIA_TYPE_MAP = {
     ".webp": "image/webp",
 }
 
+# Registered upload namespaces. Each namespace maps to the object-key prefix used
+# in object storage and its directory on the local filesystem (under uploads/).
+# A namespace's files are stored as <local_dir>/<uuid><ext> and addressed in the
+# database and APIs as "uploads/<namespace_dir>/<uuid><ext>".
+UPLOAD_NAMESPACES = {
+    "id_cards": {"local_dir": "id_cards", "object_prefix": "id_cards"},
+    "bus_images": {"local_dir": "bus_images", "object_prefix": "bus_images"},
+}
+DEFAULT_NAMESPACE = "id_cards"
+
 
 class StorageService(ABC):
     """Abstract base storage service defining security validation and file operations."""
@@ -173,8 +183,12 @@ class StorageService(ABC):
         self,
         file: UploadFile,
         max_size: int = MAX_FILE_SIZE_BYTES,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> tuple[bytes, str, str]:
         """Validate metadata, read file content safely, check signature, and return safe metadata."""
+        if namespace not in UPLOAD_NAMESPACES:
+            raise ValidationError(f"Unknown storage namespace '{namespace}'")
+
         self.validate_file(file, max_size=max_size)
 
         ext = Path(file.filename or "image.png").suffix.lower()
@@ -205,6 +219,7 @@ class StorageService(ABC):
         self,
         file: UploadFile,
         max_size: int = MAX_FILE_SIZE_BYTES,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> str:
         """Validate and safely save an uploaded file, returning a sanitized relative path."""
         pass
@@ -233,24 +248,47 @@ class LocalStorageService(StorageService):
         # CRITICAL FOR VERCEL: Directory creation is lazy (deferred to write operations)
         # so importing or instantiating LocalStorageService never fails on read-only filesystems.
 
+    def _uses_namespaced_layout(self) -> bool:
+        """Whether base_dir is the default 'uploads/id_cards' directory.
+
+        With the default base dir, each namespace resolves to a sibling folder
+        under the shared 'uploads' root (uploads/id_cards, uploads/bus_images, ...).
+        A custom base dir keeps the legacy flat layout: every namespace maps to
+        that single directory (used by tests and embedded deployments).
+        """
+        return self.base_dir == Path(DEFAULT_UPLOAD_DIR)
+
     def _ensure_dir(self) -> None:
         """Create directory on demand right before saving files."""
         self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_local_dir(self, namespace: str) -> Path:
+        """Map a storage namespace to its directory on the local filesystem."""
+        ns = UPLOAD_NAMESPACES.get(namespace)
+        if ns is None:
+            raise ValidationError(f"Unknown storage namespace '{namespace}'")
+        if self._uses_namespaced_layout():
+            return self.base_dir.parent / ns["local_dir"]
+        return self.base_dir
 
     def save_file(
         self,
         file: UploadFile,
         max_size: int = MAX_FILE_SIZE_BYTES,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> str:
         """Validate and safely save an uploaded file to the local filesystem."""
-        content, safe_filename, _ = self._read_and_validate_file(file, max_size=max_size)
+        content, safe_filename, _ = self._read_and_validate_file(
+            file, max_size=max_size, namespace=namespace
+        )
 
-        self._ensure_dir()
-        destination = self.base_dir / safe_filename
+        local_dir = self._resolve_local_dir(namespace)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        destination = local_dir / safe_filename
 
         # Prevent directory traversal
         resolved_dest = destination.resolve()
-        resolved_base = self.base_dir.resolve()
+        resolved_base = local_dir.resolve()
         if not resolved_dest.is_relative_to(resolved_base):
             raise ValidationError("Invalid destination path")
 
@@ -258,8 +296,27 @@ class LocalStorageService(StorageService):
             f.write(content)
 
         # Return relative POSIX path for database storage and client representation
-        relative_path = Path("uploads") / "id_cards" / safe_filename
+        ns = UPLOAD_NAMESPACES[namespace]
+        if self._uses_namespaced_layout():
+            relative_path = Path("uploads") / ns["local_dir"] / safe_filename
+        else:
+            relative_path = Path("uploads") / "id_cards" / safe_filename
         return relative_path.as_posix()
+
+    def _namespace_for_rel_path(self, rel_clean: str) -> str:
+        """Identify the storage namespace from a normalized relative path."""
+        parts = rel_clean.split("/")
+        # Paths are addressed as "uploads/<namespace_dir>/<file>"; the namespace
+        # directory may sit at the start or right after the "uploads" prefix.
+        if len(parts) >= 2 and parts[0] == "uploads":
+            candidate = parts[1]
+        else:
+            candidate = parts[0] if parts else ""
+        for name, ns in UPLOAD_NAMESPACES.items():
+            if ns["local_dir"] == candidate:
+                return name
+        # Fall back to the default namespace to preserve legacy 'filename-only' lookups
+        return DEFAULT_NAMESPACE
 
     def delete_file(self, relative_path: str) -> bool:
         """Safely delete a stored local file if it exists."""
@@ -270,10 +327,13 @@ class LocalStorageService(StorageService):
             if ".." in rel_clean:
                 return False
 
+            namespace = self._namespace_for_rel_path(rel_clean)
+            local_dir = self._resolve_local_dir(namespace)
+
             filename = Path(rel_clean).name
-            full_path = (self.base_dir / filename).resolve()
+            full_path = (local_dir / filename).resolve()
             if (
-                full_path.is_relative_to(self.base_dir.resolve())
+                full_path.is_relative_to(local_dir.resolve())
                 and full_path.exists()
                 and full_path.is_file()
             ):
@@ -302,9 +362,13 @@ class LocalStorageService(StorageService):
         if ".." in rel_clean:
             raise ValidationError("Invalid file path traversal attempt")
 
+        # Identify the storage namespace from the path prefix (fail closed)
+        namespace = self._namespace_for_rel_path(rel_clean)
+        local_dir = self._resolve_local_dir(namespace)
+
         filename = Path(rel_clean).name
-        full_path = (self.base_dir / filename).resolve()
-        if not full_path.is_relative_to(self.base_dir.resolve()):
+        full_path = (local_dir / filename).resolve()
+        if not full_path.is_relative_to(local_dir.resolve()):
             raise ValidationError("Access outside storage directory is forbidden")
 
         if not full_path.exists() or not full_path.is_file():
@@ -317,7 +381,7 @@ class LocalStorageService(StorageService):
             ):
                 full_path = alt_path
             else:
-                raise NotFoundError("ID card file not found on disk")
+                raise NotFoundError("Stored file not found on disk")
 
         content = full_path.read_bytes()
         ext = full_path.suffix.lower()
@@ -328,7 +392,7 @@ class LocalStorageService(StorageService):
         """Raise error indicating signed URLs require the Supabase object storage backend."""
         raise AppException(
             "Temporary signed URLs are only supported with the Supabase storage backend. "
-            "In local development, access ID card images directly via GET /api/v1/users/{user_id}/id-card.",
+            "In local development, access stored images via their dedicated streaming endpoints.",
             status_code=501,
         )
 
@@ -376,11 +440,19 @@ class SupabaseStorageService(StorageService):
             headers["Content-Type"] = content_type
         return headers
 
-    def _normalize_object_key(self, relative_path: str) -> str:
-        """Convert expected ID-card path to safe Supabase object key 'id_cards/<filename>'.
+    def _normalize_object_key(
+        self, relative_path: str, namespace: str = DEFAULT_NAMESPACE
+    ) -> str:
+        """Convert an expected namespaced path to a safe object key '<prefix>/<filename>'.
 
         Fails closed on any unexpected, malformed, or out-of-namespace paths.
         """
+        ns = UPLOAD_NAMESPACES.get(namespace)
+        if ns is None:
+            raise ValidationError(f"Unknown storage namespace '{namespace}'")
+        prefix = ns["object_prefix"]
+        uploads_prefix = f"uploads/{ns['local_dir']}/"
+
         if not relative_path or not isinstance(relative_path, str) or not relative_path.strip():
             raise ValidationError("File path cannot be empty")
 
@@ -407,20 +479,20 @@ class SupabaseStorageService(StorageService):
 
         clean = clean.lstrip("/")
 
-        # Fail closed: Only accept expected ID-card storage path formats
-        if clean.startswith("uploads/id_cards/"):
-            remainder = clean[len("uploads/id_cards/") :]
-        elif clean.startswith("id_cards/"):
-            remainder = clean[len("id_cards/") :]
+        # Fail closed: Only accept expected storage path formats for the namespace
+        if clean.startswith(uploads_prefix):
+            remainder = clean[len(uploads_prefix) :]
+        elif clean.startswith(f"{prefix}/"):
+            remainder = clean[len(prefix) + 1 :]
         else:
             raise ValidationError(
-                f"Path '{relative_path}' is outside the expected 'id_cards' namespace"
+                f"Path '{relative_path}' is outside the expected '{prefix}' namespace"
             )
 
         # Ensure remainder is strictly a single filename without nested directories
         if "/" in remainder:
             raise ValidationError(
-                "Nested directories within id_cards storage namespace are forbidden"
+                f"Nested directories within {prefix} storage namespace are forbidden"
             )
 
         filename = remainder.strip()
@@ -444,17 +516,21 @@ class SupabaseStorageService(StorageService):
                         f"Dangerous double extension '{s}' is forbidden in object key"
                     )
 
-        return f"id_cards/{filename}"
+        return f"{prefix}/{filename}"
 
     def save_file(
         self,
         file: UploadFile,
         max_size: int = MAX_FILE_SIZE_BYTES,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> str:
         """Validate, check signature, and upload to private Supabase storage bucket."""
-        content, safe_filename, ext = self._read_and_validate_file(file, max_size=max_size)
+        content, safe_filename, ext = self._read_and_validate_file(
+            file, max_size=max_size, namespace=namespace
+        )
 
-        object_key = f"id_cards/{safe_filename}"
+        ns = UPLOAD_NAMESPACES[namespace]
+        object_key = f"{ns['object_prefix']}/{safe_filename}"
         content_type = MEDIA_TYPE_MAP.get(
             ext, file.content_type or "application/octet-stream"
         )
@@ -486,14 +562,15 @@ class SupabaseStorageService(StorageService):
             logger.error("Supabase storage connection error: %s", type(e).__name__)
             raise AppException("Storage service unavailable", status_code=503)
 
-        return f"uploads/id_cards/{safe_filename}"
+        return f"uploads/{ns['local_dir']}/{safe_filename}"
 
     def delete_file(self, relative_path: str) -> bool:
         """Delete an object from private Supabase bucket."""
         try:
             if not relative_path or not relative_path.strip():
                 return False
-            object_key = self._normalize_object_key(relative_path)
+            namespace = self._namespace_for_rel_path(relative_path.replace("\\", "/").strip("/"))
+            object_key = self._normalize_object_key(relative_path, namespace=namespace)
             url = f"{self.storage_base_url}/object/{self.bucket_name}/{object_key}"
             headers = self._get_headers()
 
@@ -515,9 +592,19 @@ class SupabaseStorageService(StorageService):
             logger.warning("Supabase storage delete error: %s", type(e).__name__)
             return False
 
+    def _namespace_for_rel_path(self, rel_clean: str) -> str:
+        """Identify the storage namespace from a normalized relative path."""
+        prefix = rel_clean.split("/", 1)[0]
+        for name, ns in UPLOAD_NAMESPACES.items():
+            if ns["local_dir"] == prefix:
+                return name
+        return DEFAULT_NAMESPACE
+
     def get_file(self, relative_path: str) -> tuple[bytes, str]:
         """Download private object from Supabase bucket with server-side authentication."""
-        object_key = self._normalize_object_key(relative_path)
+        rel_clean = relative_path.replace("\\", "/").strip("/")
+        namespace = self._namespace_for_rel_path(rel_clean)
+        object_key = self._normalize_object_key(relative_path, namespace=namespace)
         url = (
             f"{self.storage_base_url}/object/authenticated/{self.bucket_name}/{object_key}"
         )
@@ -527,7 +614,7 @@ class SupabaseStorageService(StorageService):
             with httpx.Client(timeout=15.0) as client:
                 resp = client.get(url, headers=headers)
                 if resp.status_code == 404:
-                    raise NotFoundError("ID card file not found in storage")
+                    raise NotFoundError("Stored file not found in storage")
                 if resp.status_code != 200:
                     logger.error(
                         "Supabase storage download failed with status %s",
@@ -657,11 +744,13 @@ class SupabaseStorageService(StorageService):
         return full_url
 
     def get_signed_url(self, relative_path: str, expires_in: int = 60) -> str:
-        """Create a temporary signed URL to view private ID card from Supabase."""
+        """Create a temporary signed URL to view a private stored object from Supabase."""
         if expires_in < 1 or expires_in > 300:
             raise ValidationError("Signed URL expiry must be between 1 and 300 seconds")
 
-        object_key = self._normalize_object_key(relative_path)
+        rel_clean = relative_path.replace("\\", "/").strip("/")
+        namespace = self._namespace_for_rel_path(rel_clean)
+        object_key = self._normalize_object_key(relative_path, namespace=namespace)
         url = f"{self.storage_base_url}/object/sign/{self.bucket_name}/{object_key}"
         headers = self._get_headers(content_type="application/json")
         body = {"expiresIn": expires_in}
@@ -670,7 +759,7 @@ class SupabaseStorageService(StorageService):
             with httpx.Client(timeout=10.0) as client:
                 resp = client.post(url, headers=headers, json=body)
                 if resp.status_code == 404:
-                    raise NotFoundError("ID card file not found in storage")
+                    raise NotFoundError("Stored file not found in storage")
                 if resp.status_code != 200:
                     logger.error(
                         "Supabase storage signed URL creation failed with status: %s",
@@ -739,9 +828,12 @@ class StorageServiceProxy:
         )
 
     def save_file(
-        self, file: UploadFile, max_size: int = MAX_FILE_SIZE_BYTES
+        self,
+        file: UploadFile,
+        max_size: int = MAX_FILE_SIZE_BYTES,
+        namespace: str = DEFAULT_NAMESPACE,
     ) -> str:
-        return self._service.save_file(file, max_size=max_size)
+        return self._service.save_file(file, max_size=max_size, namespace=namespace)
 
     def delete_file(self, relative_path: str) -> bool:
         return self._service.delete_file(relative_path)

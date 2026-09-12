@@ -165,9 +165,15 @@ def get_user_service(
 
 def get_bus_service(
     bus_repo: BusRepository = Depends(get_bus_repository),
+    trip_repo: TripRepository = Depends(get_trip_repository),
+    reservation_repo: ReservationRepository = Depends(get_reservation_repository),
 ) -> BusService:
-    """Dependency returning a BusService instance."""
-    return BusService(bus_repo)
+    """Dependency returning a BusService instance with image-access repos."""
+    return BusService(
+        bus_repo=bus_repo,
+        trip_repo=trip_repo,
+        reservation_repo=reservation_repo,
+    )
 
 
 def get_station_service(

@@ -103,6 +103,7 @@ class SubscriptionPlanType(enum.StrEnum):
     """Supported student subscription plan durations/types."""
 
     DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
     MONTHLY = "MONTHLY"
     TERM = "TERM"
 

@@ -176,17 +176,13 @@ def _setup_transit_fixtures(
     }
 
 
-def _add_calendar_months(start_date: date, months: int) -> date:
-    """Calculate end_date exactly according to the production calendar month logic."""
-    month = start_date.month - 1 + months
-    year = start_date.year + month // 12
-    target_month = month % 12 + 1
-    day = min(start_date.day, calendar.monthrange(year, target_month)[1])
-    return date(year, target_month, day)
+def _plan_end_date(start_date: date, duration_days: int) -> date:
+    """Calculate end_date exactly according to the production duration logic."""
+    return start_date + timedelta(days=duration_days - 1)
 
 
 def _get_boundary_test_cases():
-    """Dynamically generate month boundary test cases for upcoming future years."""
+    """Dynamically generate month/year boundary test cases for upcoming future years."""
     base_year = datetime.now(timezone.utc).year + 1
     non_leap = base_year
     while calendar.isleap(non_leap):
@@ -195,11 +191,11 @@ def _get_boundary_test_cases():
     while not calendar.isleap(leap):
         leap += 1
     return [
-        (date(non_leap, 1, 31), date(non_leap, 2, 28)),  # Jan 31 -> Feb 28 (non-leap year)
-        (date(leap, 1, 31), date(leap, 2, 29)),          # Jan 31 -> Feb 29 (leap year)
-        (date(base_year, 8, 31), date(base_year, 9, 30)),  # Aug 31 -> Sep 30
-        (date(base_year, 5, 31), date(base_year, 6, 30)),  # May 31 -> Jun 30
-        (date(base_year, 12, 31), date(base_year + 1, 1, 31)), # Dec 31 -> Jan 31 (year transition)
+        (date(non_leap, 1, 31), date(non_leap, 1, 31) + timedelta(days=29)),  # Jan 31 -> Mar 2
+        (date(leap, 1, 31), date(leap, 1, 31) + timedelta(days=29)),          # Jan 31 (leap)
+        (date(base_year, 8, 31), date(base_year, 8, 31) + timedelta(days=29)),  # Aug 31 -> Sep 29
+        (date(base_year, 5, 31), date(base_year, 5, 31) + timedelta(days=29)),  # May 31 -> Jun 29
+        (date(base_year, 12, 31), date(base_year, 12, 31) + timedelta(days=29)), # Dec 31 -> Jan 29 (year transition)
     ]
 
 
@@ -252,7 +248,7 @@ def test_monthly_subscription_creation_and_contract(
     headers = {"Authorization": f"Bearer {student_token}"}
 
     start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
-    expected_end = _add_calendar_months(start_d, 1)
+    expected_end = _plan_end_date(start_d, 30)
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
@@ -268,7 +264,7 @@ def test_monthly_subscription_creation_and_contract(
     assert data["plan_id"] == fixtures["plan_monthly"].id
     assert float(data["price_snapshot"]) == 750.0
     assert data["start_date"] == start_d.isoformat()
-    assert data["end_date"] == expected_end.isoformat()  # Exactly 1 calendar month
+    assert data["end_date"] == expected_end.isoformat()  # duration_days = 30
     assert data["status"] == "PENDING"
 
 
@@ -279,7 +275,7 @@ def test_monthly_subscription_creation_and_contract(
 def test_monthly_subscription_month_boundary_edge_cases(
     client_with_db: TestClient, db_session: Session, start_input: date, expected_end: date
 ) -> None:
-    """Verify month boundary date calculation for monthly subscriptions."""
+    """Verify duration-based end date across month and year boundaries."""
     fixtures = _setup_transit_fixtures(db_session)
     student, student_token = _create_user_and_token(
         db_session, f"stu_boundary_{start_input.isoformat()}@ra7al.edu", RoleEnum.STUDENT
@@ -310,9 +306,9 @@ def test_term_subscription_duration_and_pricing(
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    # Start date dynamically relative to today -> End date 3 calendar months later
+    # Start date dynamically relative to today -> End date 90 days later
     start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
-    expected_end = _add_calendar_months(start_d, 3)
+    expected_end = _plan_end_date(start_d, 90)
     payload = {
         "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_term"].id,

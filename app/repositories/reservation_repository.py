@@ -47,6 +47,21 @@ class ReservationRepository:
         )
         return self.db.scalar(stmt) or 0
 
+    def student_has_confirmed_reservation_on_bus(
+        self, student_id: int, bus_id: int
+    ) -> bool:
+        """Whether the student holds a CONFIRMED reservation on any trip using the bus."""
+        stmt = (
+            select(func.count(Reservation.id))
+            .join(Trip, Reservation.trip_id == Trip.id)
+            .where(
+                Reservation.student_id == student_id,
+                Reservation.status == ReservationStatus.CONFIRMED,
+                Trip.bus_id == bus_id,
+            )
+        )
+        return (self.db.scalar(stmt) or 0) > 0
+
     def get_trip_for_update(self, trip_id: int) -> Trip | None:
         """Lock trip row for update to ensure concurrency safety during reservation."""
         # SQLite in tests doesn't support SELECT FOR UPDATE, so fallback gracefully

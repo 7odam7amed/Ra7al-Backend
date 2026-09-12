@@ -562,7 +562,21 @@ def test_missing_supabase_credentials_raises_error() -> None:
         )
 
 
-def test_default_config_is_local_without_supabase() -> None:
+def test_default_config_is_local_without_supabase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no Supabase configuration at all (env or otherwise), local storage is the default.
+
+    Environment variables are explicitly removed because Windows/macOS machines can
+    carry persistent user-level env vars (SUPABASE_URL, CORS_ORIGINS, ...) that would
+    otherwise leak into Settings; pydantic-settings resolves env vars before defaults.
+    """
+    for var in (
+        "STORAGE_BACKEND",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_STORAGE_BUCKET",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     settings = Settings()
     assert settings.STORAGE_BACKEND == "local"
     assert settings.SUPABASE_URL is None

@@ -32,7 +32,7 @@ def create_subscription_plan(
         get_subscription_plan_service
     ),
 ) -> SubscriptionPlanResponse:
-    """Create a new student subscription plan (DAILY, MONTHLY, TERM)."""
+    """Create a new student subscription plan (DAILY, WEEKLY, MONTHLY, TERM) with a CEO-defined duration."""
     plan = plan_service.create_plan(current_user=current_user, data=data)
     return SubscriptionPlanResponse.model_validate(plan)
 

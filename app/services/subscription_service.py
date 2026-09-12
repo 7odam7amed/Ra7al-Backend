@@ -1,4 +1,3 @@
-import calendar
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import secrets
@@ -99,6 +98,17 @@ class SubscriptionService:
             )
         return subscription
 
+    @staticmethod
+    def _calculate_end_date(start_date: date, duration_days: int) -> date:
+        """Compute subscription end date from the package's configured duration.
+
+        A plan of N days covers its start date plus the following N-1 days, so a
+        DAILY plan (duration_days = 1) is valid only on its start date.
+        """
+        if duration_days < 1:
+            raise ValidationError("Plan duration must be at least one day")
+        return start_date + timedelta(days=duration_days - 1)
+
     def _supervisor_can_access_subscription(
         self, supervisor_id: int, subscription: Subscription
     ) -> bool:
@@ -184,22 +194,10 @@ class SubscriptionService:
         start_date = data.start_date or data.service_date or datetime.now(timezone.utc).date()
         if start_date < datetime.now(timezone.utc).date():
             raise ValidationError("Subscription start date cannot be in the past")
-        if plan.plan_type == SubscriptionPlanType.DAILY:
-            end_date = start_date
-        elif plan.plan_type == SubscriptionPlanType.MONTHLY:
-            month = start_date.month - 1 + 1
-            year = start_date.year + month // 12
-            target_month = month % 12 + 1
-            day = min(start_date.day, calendar.monthrange(year, target_month)[1])
-            end_date = date(year, target_month, day)
-        elif plan.plan_type == SubscriptionPlanType.TERM:
-            month = start_date.month - 1 + 3
-            year = start_date.year + month // 12
-            target_month = month % 12 + 1
-            day = min(start_date.day, calendar.monthrange(year, target_month)[1])
-            end_date = date(year, target_month, day)
-        else:
-            end_date = start_date + timedelta(days=plan.duration_days)
+
+        # Generic duration model: subscription validity is always derived from the
+        # package's configured duration_days, never from hardcoded type-specific values.
+        end_date = self._calculate_end_date(start_date, plan.duration_days)
 
         # 7. Check for overlapping active subscription on the same route
         overlapping = self.subscription_repo.find_overlapping_active_subscription(
@@ -325,7 +323,7 @@ class SubscriptionService:
 
         return SubscriptionQRResponse(
             subscription_id=sub.id,
-            plan_type=sub.plan.plan_type if sub.plan else SubscriptionPlanType.MONTHLY,
+            plan_type=sub.plan.plan_type if sub.plan else SubscriptionPlanType.WEEKLY,
             route_id=sub.route_id,
             route_name=sub.route.name if sub.route else f"Route {sub.route_id}",
             valid_from=sub.start_date,
@@ -397,6 +395,92 @@ class SubscriptionService:
         )
 
         return self._build_details(items), total
+
+    def renew_subscription(
+        self, subscription_id: int, current_user: User
+    ) -> Subscription:
+        """Renew an existing subscription for the logged-in student.
+
+        The new subscription starts the day after the current one ends and its
+        duration is taken from the selected package's configured duration_days.
+        The plan's current price is snapshotted onto the renewal.
+        """
+        sub = self.get_subscription_by_id_raw(subscription_id)
+
+        if current_user.role == RoleEnum.STUDENT:
+            if sub.student_id != current_user.id:
+                raise ForbiddenError("You cannot renew another student's subscription")
+        elif current_user.role != RoleEnum.CEO:
+            raise ForbiddenError("Only the subscription owner or CEO can renew a subscription")
+
+        if sub.status not in (SubscriptionStatus.ACTIVE, SubscriptionStatus.EXPIRED):
+            raise ValidationError(
+                f"Cannot renew subscription in status '{sub.status.value}'"
+            )
+
+        plan = sub.plan
+        if plan is None:
+            raise NotFoundError("Subscription plan for this subscription no longer exists")
+        if not plan.is_active:
+            raise ValidationError("Cannot renew with an inactive subscription plan")
+
+        today = datetime.now(timezone.utc).date()
+        new_start = sub.end_date + timedelta(days=1)
+        if new_start < today:
+            new_start = today
+
+        new_end = self._calculate_end_date(new_start, plan.duration_days)
+
+        overlapping = self.subscription_repo.find_overlapping_active_subscription(
+            student_id=sub.student_id,
+            route_id=sub.route_id,
+            start_date=new_start,
+            end_date=new_end,
+        )
+        if overlapping is not None:
+            raise ConflictError(
+                f"An active subscription (ID: {overlapping.id}) already exists for this route "
+                f"covering dates {overlapping.start_date} to {overlapping.end_date}"
+            )
+
+        # Hand over the blocking slot: the model enforces at most one non-terminal
+        # (PENDING/ACTIVE) subscription per (student, route). The renewed cycle
+        # replaces the current one, so the outgoing subscription is expired before
+        # the renewal row is inserted; the renewal then enters the lifecycle as
+        # PENDING until its payment is verified.
+        if sub.status == SubscriptionStatus.ACTIVE:
+            self.subscription_repo.update_status(sub, SubscriptionStatus.EXPIRED)
+
+        raw_qr_token = secrets.token_urlsafe(32)
+        qr_token_hash = hashlib.sha256(raw_qr_token.encode("utf-8")).hexdigest()
+
+        renewal = self.subscription_repo.create(
+            student_id=sub.student_id,
+            route_id=sub.route_id,
+            plan_id=plan.id,
+            price_snapshot=plan.price,
+            currency=plan.currency or "EGP",
+            start_date=new_start,
+            end_date=new_end,
+            outbound_pickup_point_id=sub.outbound_pickup_point_id,
+            return_pickup_point_id=sub.return_pickup_point_id,
+            return_pickup_mode=sub.return_pickup_mode,
+            qr_token_hash=qr_token_hash,
+            qr_token=raw_qr_token,
+            status=SubscriptionStatus.PENDING,
+        )
+
+        payment = self.payment_repo.create(
+            student_id=sub.student_id,
+            subscription_id=renewal.id,
+            amount=plan.price,
+            currency=plan.currency or "EGP",
+            method=PaymentMethod.CASH,
+            status=PaymentStatus.PENDING,
+            transaction_reference=None,
+            paid_at=None,
+        )
+        return self.subscription_repo.update_payment(renewal, payment.id)
 
     def cancel_subscription(
         self, subscription_id: int, current_user: User

@@ -51,6 +51,7 @@ class BusRepository:
         model: str | None = None,
         year: int | None = None,
         status: BusStatus = BusStatus.ACTIVE,
+        image_url: str | None = None,
     ) -> Bus:
         """Persist a new bus record in the database."""
         bus = Bus(
@@ -60,6 +61,7 @@ class BusRepository:
             model=model.strip() if model else None,
             year=year,
             status=status,
+            image_url=image_url,
         )
         self.db.add(bus)
         self.db.commit()
@@ -108,6 +110,7 @@ class BusRepository:
         model: str | None = None,
         year: int | None = None,
         status: BusStatus | None = None,
+        image_url: str | None = None,
     ) -> Bus:
         """Apply updates to an existing bus entity and commit changes."""
         if bus_number is not None:
@@ -122,7 +125,16 @@ class BusRepository:
             bus.year = year
         if status is not None:
             bus.status = status
+        if image_url is not None:
+            bus.image_url = image_url
 
+        self.db.commit()
+        self.db.refresh(bus)
+        return bus
+
+    def set_image(self, bus: Bus, image_url: str | None) -> Bus:
+        """Explicitly set or clear (None) the bus image reference."""
+        bus.image_url = image_url
         self.db.commit()
         self.db.refresh(bus)
         return bus

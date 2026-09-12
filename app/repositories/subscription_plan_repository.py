@@ -20,10 +20,24 @@ class SubscriptionPlanRepository:
     def get_by_type(
         self, plan_type: SubscriptionPlanType, active_only: bool = True
     ) -> SubscriptionPlan | None:
-        """Fetch a plan by its plan type."""
+        """Fetch the first plan of a given plan type."""
         stmt = select(SubscriptionPlan).where(SubscriptionPlan.plan_type == plan_type)
         if active_only:
             stmt = stmt.where(SubscriptionPlan.is_active.is_(True))
+        return self.db.execute(stmt).scalars().first()
+
+    def get_by_type_name_duration(
+        self,
+        plan_type: SubscriptionPlanType,
+        name: str,
+        duration_days: int,
+    ) -> SubscriptionPlan | None:
+        """Fetch an exact package duplicate by type, name, and duration."""
+        stmt = select(SubscriptionPlan).where(
+            SubscriptionPlan.plan_type == plan_type,
+            SubscriptionPlan.name == name.strip(),
+            SubscriptionPlan.duration_days == duration_days,
+        )
         return self.db.execute(stmt).scalars().first()
 
     def list_active(self) -> list[SubscriptionPlan]:
@@ -92,6 +106,7 @@ class SubscriptionPlanRepository:
         name: str | None = None,
         price: Decimal | None = None,
         is_active: bool | None = None,
+        duration_days: int | None = None,
     ) -> SubscriptionPlan:
         """Update an existing subscription plan."""
         if name is not None:
@@ -100,6 +115,8 @@ class SubscriptionPlanRepository:
             plan.price = price
         if is_active is not None:
             plan.is_active = is_active
+        if duration_days is not None:
+            plan.duration_days = duration_days
 
         self.db.commit()
         self.db.refresh(plan)

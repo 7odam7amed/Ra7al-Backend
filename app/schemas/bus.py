@@ -1,9 +1,25 @@
 from datetime import datetime
 import math
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import BusStatus
+
+
+def _coerce_int(value: Any) -> Any:
+    """Coerce numeric form-field strings to int; blank strings become None.
+
+    multipart/form-data transports every value as a string, so numeric fields
+    arrive as "40" instead of 40. Validation strictness is unchanged: the value
+    is converted first and then checked against the declared constraints.
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return int(stripped)
+    return value
 
 
 class BusCreateRequest(BaseModel):
@@ -21,7 +37,7 @@ class BusCreateRequest(BaseModel):
     plate_number: str | None = Field(
         default=None, min_length=1, max_length=50, examples=["ABC-1234"]
     )
-    capacity: int = Field(
+    capacity: int | str | None = Field(
         default=50, gt=0, le=150, description="Bus passenger capacity (must be positive, <= 150)", examples=[50]
     )
     model: str | None = Field(
@@ -30,9 +46,15 @@ class BusCreateRequest(BaseModel):
     type: str | None = Field(
         default=None, max_length=100, examples=["Coaster"]
     )
-    year: int | None = Field(
+    year: int | str | None = Field(
         default=None, ge=1990, le=2050, description="Manufacturing year", examples=[2022]
     )
+
+    @field_validator("capacity", "year", mode="before")
+    @classmethod
+    def coerce_numeric_strings(cls, value: Any) -> Any:
+        # multipart/form-data delivers numbers as strings
+        return _coerce_int(value)
 
     @model_validator(mode="after")
     def resolve_aliases(self) -> "BusCreateRequest":
@@ -69,7 +91,7 @@ class BusUpdateRequest(BaseModel):
     plate_number: str | None = Field(
         default=None, min_length=1, max_length=50, examples=["XYZ-5678"]
     )
-    capacity: int | None = Field(
+    capacity: int | str | None = Field(
         default=None, gt=0, le=150, description="Bus passenger capacity (must be positive, <= 150)", examples=[45]
     )
     model: str | None = Field(
@@ -78,9 +100,15 @@ class BusUpdateRequest(BaseModel):
     type: str | None = Field(
         default=None, max_length=100, examples=["Minibus"]
     )
-    year: int | None = Field(
+    year: int | str | None = Field(
         default=None, ge=1990, le=2050, description="Manufacturing year", examples=[2023]
     )
+
+    @field_validator("capacity", "year", mode="before")
+    @classmethod
+    def coerce_numeric_strings(cls, value: Any) -> Any:
+        # multipart/form-data delivers numbers as strings
+        return _coerce_int(value)
 
     @model_validator(mode="after")
     def resolve_aliases(self) -> "BusUpdateRequest":
@@ -109,6 +137,15 @@ class BusUpdateRequest(BaseModel):
         return self
 
 
+class BusImageRemoveRequest(BaseModel):
+    """Payload for removing a bus's image (CEO only)."""
+
+    remove_image: bool = Field(
+        ...,
+        description="Set to true to delete the bus's current image reference",
+    )
+
+
 class BusStatusUpdateRequest(BaseModel):
     """Schema for updating bus operational status."""
 
@@ -129,8 +166,21 @@ class BusResponse(BaseModel):
     model: str | None
     year: int | None
     status: BusStatus
+    image_url: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class BusImageResponse(BaseModel):
+    """Metadata describing a stored bus image reference."""
+
+    bus_id: int
+    has_image: bool
+    image_url: str | None = None
+    image_stream_url: str | None = Field(
+        default=None,
+        description="Authorized endpoint that streams the image bytes",
+    )
 
 
 class PaginatedBusResponse(BaseModel):

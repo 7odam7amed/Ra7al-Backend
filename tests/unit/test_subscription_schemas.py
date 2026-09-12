@@ -22,10 +22,12 @@ def test_subscription_plan_schemas() -> None:
     plan_create = SubscriptionPlanCreate(
         name="Daily Ticket",
         plan_type=SubscriptionPlanType.DAILY,
+        duration_days=1,
         price=Decimal("40.00"),
     )
     assert plan_create.name == "Daily Ticket"
     assert plan_create.plan_type == SubscriptionPlanType.DAILY
+    assert plan_create.duration_days == 1
     assert plan_create.price == Decimal("40.00")
 
     # Blank name rejected
@@ -33,6 +35,7 @@ def test_subscription_plan_schemas() -> None:
         SubscriptionPlanCreate(
             name="   ",
             plan_type=SubscriptionPlanType.MONTHLY,
+            duration_days=30,
             price=Decimal("500.00"),
         )
 
@@ -41,7 +44,17 @@ def test_subscription_plan_schemas() -> None:
         SubscriptionPlanCreate(
             name="Monthly Pass",
             plan_type=SubscriptionPlanType.MONTHLY,
+            duration_days=30,
             price=Decimal("-10.00"),
+        )
+
+    # Non-positive duration rejected
+    with pytest.raises(ValidationError):
+        SubscriptionPlanCreate(
+            name="Zero Duration",
+            plan_type=SubscriptionPlanType.MONTHLY,
+            duration_days=0,
+            price=Decimal("500.00"),
         )
 
     # Valid update

@@ -198,17 +198,11 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
 
     today = datetime.now(timezone.utc).date()
     start_d = today
-    # Expected end date for monthly (1 calendar month)
-    m = start_d.month - 1 + 1
-    y = start_d.year + m // 12
-    tm = m % 12 + 1
-    expected_monthly_end = date(y, tm, min(start_d.day, calendar.monthrange(y, tm)[1]))
+    # Expected end date for monthly: plan covers start + 29 days (duration_days = 30)
+    expected_monthly_end = start_d + timedelta(days=29)
 
-    # Expected end date for term (3 calendar months)
-    m_term = start_d.month - 1 + 3
-    y_term = start_d.year + m_term // 12
-    tm_term = m_term % 12 + 1
-    expected_term_end = date(y_term, tm_term, min(start_d.day, calendar.monthrange(y_term, tm_term)[1]))
+    # Expected end date for term: plan covers start + 89 days (duration_days = 90)
+    expected_term_end = start_d + timedelta(days=89)
 
     # 1. Successful monthly subscription with same return pickup point
     req = SubscriptionCreateRequest(
@@ -323,7 +317,7 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
 
 
 def test_subscription_service_daily_monthly_term_date_calculations(sub_service) -> None:
-    """Explicitly verify date math for daily, monthly, and term plans across leap and boundary months."""
+    """Explicitly verify duration-based date math across month and year boundaries."""
     service, e = sub_service
 
     base_year = datetime.now(timezone.utc).year + 1
@@ -344,7 +338,7 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
     assert d_sub.start_date == date(non_leap, 2, 10)
     assert d_sub.end_date == date(non_leap, 2, 10)
 
-    # Monthly (Jan 31 -> Feb 28 in non-leap year)
+    # Monthly (duration_days = 30): Jan 31 start -> Mar 2 in a non-leap year
     m_sub = service.create_subscription(
         student_id=e["other_student"].id,
         data=SubscriptionCreateRequest(
@@ -355,9 +349,9 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
         ),
     )
     assert m_sub.start_date == date(non_leap, 1, 31)
-    assert m_sub.end_date == date(non_leap, 2, 28)
+    assert m_sub.end_date == date(non_leap, 1, 31) + timedelta(days=29)
 
-    # Term (Nov 30 -> Feb 28/29)
+    # Term (duration_days = 90): Nov 30 start -> covers 90 days into the next year
     # Cancel previous other_student sub first
     service.cancel_subscription(m_sub.id, current_user=e["other_student"])
     t_sub = service.create_subscription(
@@ -370,7 +364,7 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
         ),
     )
     assert t_sub.start_date == date(non_leap, 11, 30)
-    expected_term_end = date(non_leap + 1, 2, 29 if calendar.isleap(non_leap + 1) else 28)
+    expected_term_end = date(non_leap, 11, 30) + timedelta(days=89)
     assert t_sub.end_date == expected_term_end
 
 

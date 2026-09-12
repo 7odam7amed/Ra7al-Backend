@@ -227,6 +227,27 @@ def get_subscription_boarding_history(
 
 
 @subscriptions_router.patch(
+    "/{subscription_id}/renew",
+    response_model=SubscriptionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Renew a subscription using its plan's configured duration (owner or CEO)",
+)
+def renew_subscription(
+    subscription_id: int,
+    current_user: User = Depends(get_current_user),
+    subscription_service: SubscriptionService = Depends(
+        get_subscription_service
+    ),
+) -> SubscriptionResponse:
+    """Renew a subscription by creating the next cycle from the plan's duration_days."""
+    subscription = subscription_service.renew_subscription(
+        subscription_id=subscription_id,
+        current_user=current_user,
+    )
+    return SubscriptionResponse.model_validate(subscription)
+
+
+@subscriptions_router.patch(
     "/{subscription_id}/cancel",
     response_model=SubscriptionResponse,
     summary="Cancel a subscription (Student owner for PENDING or CEO)",

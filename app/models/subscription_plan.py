@@ -7,6 +7,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import BaseModel
 from app.models.enums import SubscriptionPlanType
 
+# Upper bound for CEO-defined plan durations (about 2 years).
+# Prevents accidental absurd values; the CEO enters the duration freely within this bound.
+MAX_PLAN_DURATION_DAYS = 730
+
 if TYPE_CHECKING:
     from app.models.subscription import Subscription
 
@@ -19,9 +23,13 @@ class SubscriptionPlan(BaseModel):
         CheckConstraint("price > 0", name="chk_subscription_plan_price_positive"),
         CheckConstraint("duration_days > 0", name="chk_subscription_plan_duration_positive"),
         CheckConstraint(
+            f"duration_days <= {MAX_PLAN_DURATION_DAYS}",
+            name="chk_subscription_plan_duration_max",
+        ),
+        # DAILY is fixed to 1 day; WEEKLY/MONTHLY/TERM durations are CEO-defined.
+        CheckConstraint(
             "(plan_type = 'DAILY' AND duration_days = 1) OR "
-            "(plan_type = 'MONTHLY' AND duration_days = 30) OR "
-            "(plan_type = 'TERM' AND duration_days = 90)",
+            "(plan_type IN ('WEEKLY', 'MONTHLY', 'TERM'))",
             name="chk_subscription_plan_canonical_duration",
         ),
     )
@@ -35,7 +43,6 @@ class SubscriptionPlan(BaseModel):
             values_callable=lambda obj: [e.value for e in obj],
         ),
         index=True,
-        unique=True,
         nullable=False,
     )
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)

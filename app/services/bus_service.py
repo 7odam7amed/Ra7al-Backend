@@ -1,17 +1,44 @@
-from app.exceptions.base import ConflictError, NotFoundError, ValidationError
+import logging
+from pathlib import Path
+
+from fastapi import UploadFile
+
+from app.core.storage import StorageService, get_storage_service
+from app.exceptions.base import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.models.bus import Bus
-from app.models.enums import BusStatus
+from app.models.enums import BusStatus, RoleEnum
 from app.repositories.bus_repository import BusRepository
+from app.repositories.reservation_repository import ReservationRepository
+from app.repositories.trip_repository import TripRepository
 from app.schemas.bus import BusCreateRequest, BusUpdateRequest
+
+logger = logging.getLogger(__name__)
+
+BUS_IMAGE_NAMESPACE = "bus_images"
 
 
 class BusService:
-    """Service handling fleet vehicle management, business rules, and validation."""
+    """Service handling fleet vehicle management, business rules, validation, and images."""
 
-    def __init__(self, bus_repo: BusRepository) -> None:
+    def __init__(
+        self,
+        bus_repo: BusRepository,
+        trip_repo: TripRepository | None = None,
+        reservation_repo: ReservationRepository | None = None,
+        storage_service: StorageService | None = None,
+    ) -> None:
         self.bus_repo = bus_repo
+        self.trip_repo = trip_repo
+        self.reservation_repo = reservation_repo
+        self._storage_service = storage_service
 
-    def create_bus(self, data: BusCreateRequest) -> Bus:
+    @property
+    def storage_service(self) -> StorageService:
+        if self._storage_service is not None:
+            return self._storage_service
+        return get_storage_service()
+
+    def create_bus(self, data: BusCreateRequest, image: UploadFile | None = None) -> Bus:
         """Create a new bus in the fleet with unique constraint validation."""
         if self.bus_repo.exists_by_bus_number(data.bus_number):
             raise ConflictError(f"A bus with number '{data.bus_number}' already exists")
@@ -21,14 +48,29 @@ class BusService:
                 f"A bus with license plate '{data.license_plate}' already exists"
             )
 
-        return self.bus_repo.create(
-            bus_number=data.bus_number,
-            license_plate=data.license_plate,
-            capacity=data.capacity,
-            model=data.model,
-            year=data.year,
-            status=BusStatus.ACTIVE,
-        )
+        image_url: str | None = None
+        if image is not None:
+            # Validate and store the image BEFORE persisting the bus so the
+            # database never references a file that failed to upload.
+            image_url = self.storage_service.save_file(
+                image, namespace=BUS_IMAGE_NAMESPACE
+            )
+
+        try:
+            return self.bus_repo.create(
+                bus_number=data.bus_number,
+                license_plate=data.license_plate,
+                capacity=data.capacity,
+                model=data.model,
+                year=data.year,
+                status=BusStatus.ACTIVE,
+                image_url=image_url,
+            )
+        except Exception:
+            # DB persistence failed: do not leave an orphaned stored file behind.
+            if image_url:
+                self.storage_service.delete_file(image_url)
+            raise
 
     def get_bus_by_id(self, bus_id: int) -> Bus:
         """Fetch a single bus by ID or raise NotFoundError."""
@@ -81,6 +123,84 @@ class BusService:
             model=data.model,
             year=data.year,
         )
+
+    def replace_bus_image(self, bus_id: int, image: UploadFile) -> Bus:
+        """Upload and replace a bus's image (CEO only).
+
+        Order of operations keeps the DB consistent: upload the new object first,
+        update the reference, then best-effort delete the previous object.
+        """
+        bus = self.get_bus_by_id(bus_id)
+
+        new_image_url = self.storage_service.save_file(
+            image, namespace=BUS_IMAGE_NAMESPACE
+        )
+
+        old_image_url = bus.image_url
+        try:
+            updated = self.bus_repo.update(bus=bus, image_url=new_image_url)
+        except Exception:
+            # Reference update failed: remove the freshly uploaded object.
+            self.storage_service.delete_file(new_image_url)
+            raise
+
+        # Delete the old object only after the new upload and DB update succeeded.
+        if old_image_url:
+            self.storage_service.delete_file(old_image_url)
+
+        return updated
+
+    def remove_bus_image(self, bus_id: int) -> Bus:
+        """Remove a bus's image reference and delete the stored object (CEO only)."""
+        bus = self.get_bus_by_id(bus_id)
+
+        old_image_url = bus.image_url
+        if not old_image_url:
+            raise ValidationError("Bus has no image to remove")
+
+        updated = self.bus_repo.set_image(bus, None)
+        self.storage_service.delete_file(old_image_url)
+        return updated
+
+    def get_bus_image(
+        self, bus_id: int, current_user
+    ) -> tuple[bytes, str, Bus]:
+        """Stream bus image bytes after enforcing relationship-based access.
+
+        Access rules:
+            - CEO: any bus.
+            - SUPERVISOR: only buses assigned to a trip assigned to them.
+            - STUDENT: only buses of trips they hold a CONFIRMED reservation on.
+        """
+        bus = self.get_bus_by_id(bus_id)
+
+        if current_user.role == RoleEnum.CEO:
+            pass
+        elif current_user.role == RoleEnum.SUPERVISOR:
+            if self.trip_repo is None or not self.trip_repo.supervisor_has_trip_on_bus(
+                supervisor_id=current_user.id, bus_id=bus.id
+            ):
+                raise ForbiddenError("You are not assigned to this bus")
+        elif current_user.role == RoleEnum.STUDENT:
+            if (
+                self.reservation_repo is None
+                or not self.reservation_repo.student_has_confirmed_reservation_on_bus(
+                    student_id=current_user.id, bus_id=bus.id
+                )
+            ):
+                raise ForbiddenError("You do not have access to this bus")
+        else:
+            raise ForbiddenError("Access denied")
+
+        if not bus.image_url:
+            raise NotFoundError(f"Bus with ID {bus_id} has no image")
+
+        rel_path = bus.image_url.replace("\\", "/")
+        if ".." in rel_path:
+            raise ValidationError("Invalid stored image path")
+
+        content, media_type = self.storage_service.get_file(rel_path)
+        return content, media_type, bus
 
     def update_bus_status(self, bus_id: int, status: BusStatus) -> Bus:
         """Update the operational status of a bus."""
