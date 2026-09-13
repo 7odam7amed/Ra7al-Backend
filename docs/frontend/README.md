@@ -42,13 +42,13 @@ Development:  http://localhost:8000
 Production:   UNKNOWN / VERIFY WITH BACKEND (deployment-provided domain)
 
 API prefix:   /api/v1
-Full example: {API_BASE_URL}/api/v1/auth/login
+Full example: https://ra7al-backend-two.vercel.app/api/v1/auth/login
 ```
 
 Recommended frontend config:
 
 ```env
-VITE_API_BASE_URL=http://localhost:8000   # or the production domain
+VITE_API_BASE_URL= https://ra7al-backend-two.vercel.app/api/v1   # or the production domain
 ```
 
 > A handful of endpoints are **unversioned** (no `/api/v1`): `GET /health`, `GET /health/db`, and the Swagger docs routes. Everything else lives under `/api/v1`.

@@ -8,16 +8,16 @@ Practical integration instructions using only actual endpoints and behavior.
 
 ```env
 # .env of your frontend project
-VITE_API_BASE_URL=http://localhost:8000        # development
-# VITE_API_BASE_URL=https://<production-domain> # production — UNKNOWN / VERIFY WITH BACKEND for the exact host
+VITE_API_BASE_URL=https://ra7al-backend-two.vercel.app/api/v1        # development
+# VITE_API_BASE_URL=https://ra7al-backend-two.vercel.app/api/v1 # production — UNKNOWN / VERIFY WITH BACKEND for the exact host
 ```
 
-All versioned endpoints are `{API_BASE_URL}/api/v1/...`. Unversioned: `/health`, `/health/db`, `/docs`, `/redoc`, `/openapi.json`.
+All versioned endpoints are `https://ra7al-backend-two.vercel.app/api/v1/...`. Unversioned: `/health`, `/health/db`, `/docs`, `/redoc`, `/openapi.json`.
 
 ## 2. Login
 
 ```js
-const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+const res = await fetch(`$https://ra7al-backend-two.vercel.app/api/v1/auth/login`, {
   method: "POST",
   headers: { "Content-Type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({
@@ -108,7 +108,7 @@ const meta = await api.get(`/api/v1/buses/${busId}/image/metadata`);
 if (!meta.data.has_image) return renderPlaceholder();
 
 // 2. Stream bytes as blob (auth header required — <img src> won't work)
-const img = await api.get(`${API_BASE_URL}/api/v1/buses/${busId}/image`, {
+const img = await api.get(`$https://ra7al-backend-two.vercel.app/api/v1/buses/${busId}/image`, {
   responseType: "blob",
 });
 busImage.src = URL.createObjectURL(img.data);
@@ -215,15 +215,15 @@ If the browser reports a CORS error: (1) confirm the exact origin (scheme + host
 
 | Resource | URL | Notes |
 |---|---|---|
-| Swagger UI | `{API_BASE_URL}/docs` | Try endpoints interactively. Click **Authorize**, choose OAuth2 password flow, enter the phone number as `username`. |
-| ReDoc | `{API_BASE_URL}/redoc` | Readable reference. |
-| OpenAPI JSON | `{API_BASE_URL}/openapi.json` | Generate typed clients from it. |
+| Swagger UI | `https://ra7al-backend-two.vercel.app/docs` | Try endpoints interactively. Click **Authorize**, choose OAuth2 password flow, enter the phone number as `username`. |
+| ReDoc | `https://ra7al-backend-two.vercel.app/redoc` | Readable reference. |
+| OpenAPI JSON | `https://ra7al-backend-two.vercel.app/openapi.json` | Generate typed clients from it. |
 
 > These doc routes are unversioned (no `/api/v1`). This documentation package is derived from the code and cross-checked against these schemas.
 
 ## 16. Integration Checklist
 
-- [ ] `API_BASE_URL` configured per environment
+- [ ] `https://ra7al-backend-two.vercel.app/api/v1` configured per environment
 - [ ] Login via form-urlencoded; pending/rejected/inactive messages surfaced
 - [ ] Token attached via interceptor; 401 → re-login
 - [ ] Role from `GET /auth/me`; role-specific dashboards
