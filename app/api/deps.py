@@ -353,3 +353,6 @@ CEO_ONLY = require_roles(RoleEnum.CEO)
 SUPERVISOR_ONLY = require_roles(RoleEnum.SUPERVISOR)
 STUDENT_ONLY = require_roles(RoleEnum.STUDENT)
 CEO_OR_SUPERVISOR = require_roles(RoleEnum.CEO, RoleEnum.SUPERVISOR)
+# Any authenticated user regardless of role. Use ONLY for read-only endpoints
+# whose data is safe to expose app-wide (authentication is still enforced).
+ANY_AUTHENTICATED_ROLE = require_roles(*list(RoleEnum))

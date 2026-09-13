@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 
 from fastapi import UploadFile
 
@@ -15,6 +14,31 @@ from app.schemas.bus import BusCreateRequest, BusUpdateRequest
 logger = logging.getLogger(__name__)
 
 BUS_IMAGE_NAMESPACE = "bus_images"
+
+
+def _has_uploadable_content(image: UploadFile | None) -> bool:
+    """Detect an empty/no-file image part.
+
+    HTML forms submit an untouched ``<input type="file">`` as an empty part
+    (filename="" or no bytes). Treating such a part as "no image" keeps the
+    no-image creation path free of stale or empty payloads, so the new bus can
+    never inherit another bus's image or object key.
+    """
+    if image is None:
+        return False
+    filename = (image.filename or "").strip()
+    if not filename:
+        return False
+    try:
+        if (image.size or 0) == 0 and image.file.read(1) == b"":
+            return False
+    except Exception:
+        return False
+    try:
+        image.file.seek(0)
+    except Exception:
+        pass
+    return True
 
 
 class BusService:
@@ -49,7 +73,7 @@ class BusService:
             )
 
         image_url: str | None = None
-        if image is not None:
+        if _has_uploadable_content(image):
             # Validate and store the image BEFORE persisting the bus so the
             # database never references a file that failed to upload.
             image_url = self.storage_service.save_file(
@@ -131,6 +155,9 @@ class BusService:
         update the reference, then best-effort delete the previous object.
         """
         bus = self.get_bus_by_id(bus_id)
+
+        if not _has_uploadable_content(image):
+            raise ValidationError("No image file was provided")
 
         new_image_url = self.storage_service.save_file(
             image, namespace=BUS_IMAGE_NAMESPACE

@@ -27,6 +27,11 @@ from app.schemas.boarding import (
     SupervisorTripStudentResponse,
 )
 
+# Business rule: exactly two QR usages are granted per calendar day
+# (one outbound and one return). The total allowance for a subscription is
+# derived from the plan: max_qr_usages = duration_days * 2.
+QR_USAGES_PER_DAY = 2
+
 
 class BoardingService:
     """Business logic for QR scanning, boarding verification, duplicate protection, and attendance."""
@@ -109,6 +114,23 @@ class BoardingService:
                 f"Subscription is for Route {subscription.route_id}, but this trip is on Route {trip.route_id}"
             )
 
+        # 7b. QR usage allowance checks (CEO-defined duration model).
+        # The plan's duration_days represents usable days, and each usage day
+        # grants two QR usages (one outbound + one return):
+        #     max_qr_usages = duration_days * 2
+        # Calendar days without a scan do NOT consume the allowance; only
+        # successful scans do (boarding records are the source of truth).
+        duration_days = subscription.plan.duration_days if subscription.plan else 1
+        if duration_days < 1:
+            duration_days = 1
+        max_qr_usages = duration_days * 2
+        used_qr_usages = self.boarding_repo.count_usages_for_subscription(subscription.id)
+        if used_qr_usages >= max_qr_usages:
+            raise ValidationError(
+                "QR usage allowance exhausted: the subscription has used all "
+                f"{max_qr_usages} allowed QR usages ({duration_days} days x 2 trips per day)"
+            )
+
         # 8. Direction and Pickup Point check
         if data.direction == BoardingDirection.OUTBOUND:
             if data.pickup_point_id != subscription.outbound_pickup_point_id:
@@ -133,16 +155,53 @@ class BoardingService:
                 f"Student has already boarded {data.direction.value} for this trip"
             )
 
-        # 10. Create Boarding Record
+        # 10. Record the boarding and consume exactly ONE usage, atomically.
+        # The subscription row is locked first so concurrent scans serialize:
+        # after acquiring the lock, every limit (daily and total) is re-checked
+        # against committed data, so two simultaneous scans can never push the
+        # usage past duration_days * 2 or past 2 per calendar day.
+        now_utc = datetime.now(timezone.utc)
+        locked_subscription = self.boarding_repo.get_subscription_row_for_update(
+            subscription.id
+        )
+        if locked_subscription is None:
+            raise NotFoundError("Subscription not found")
+        if locked_subscription.status != SubscriptionStatus.ACTIVE:
+            raise ValidationError(
+                f"Subscription is not active (current status: {locked_subscription.status.value})"
+            )
+
+        max_qr_usages = duration_days * 2
+        used_qr_usages = self.boarding_repo.count_usages_for_subscription(
+            locked_subscription.id
+        )
+        if used_qr_usages >= max_qr_usages:
+            raise ValidationError(
+                "QR usage allowance exhausted: the subscription has used all "
+                f"{max_qr_usages} allowed QR usages ({duration_days} days x 2 trips per day)"
+            )
+
+        usages_today = self.boarding_repo.count_usages_for_subscription_on_date(
+            locked_subscription.id, now_utc
+        )
+        if usages_today >= QR_USAGES_PER_DAY:
+            raise ValidationError(
+                "Daily QR usage limit reached: at most "
+                f"{QR_USAGES_PER_DAY} QR usages per day (one outbound and one return)"
+            )
+
         record = self.boarding_repo.create(
-            subscription_id=subscription.id,
-            student_id=subscription.student_id,
+            subscription_id=locked_subscription.id,
+            student_id=locked_subscription.student_id,
             trip_id=trip.id,
             supervisor_id=current_user.id,
             direction=data.direction,
             pickup_point_id=data.pickup_point_id,
+            boarded_at=now_utc,
         )
 
+        # Calendar expiration was already enforced above (step 5); a scan is
+        # only recorded while the subscription is within its validity window.
         student = subscription.student
         return BoardingResponse(
             success=True,

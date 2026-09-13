@@ -284,27 +284,64 @@ def test_route_stops_full_lifecycle(
 def test_routes_rbac_rejections(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, student_token = _create_user_and_token(db_session, "student_r_rbac@test.edu", RoleEnum.STUDENT)
-    headers = {"Authorization": f"Bearer {student_token}"}
+    """Route management is forbidden for students; read-only access is allowed.
 
-    # Student -> 403
-    assert client_with_db.post("/api/v1/routes", json={}, headers=headers).status_code == 403
-    assert client_with_db.get("/api/v1/routes", headers=headers).status_code == 403
-    assert client_with_db.get("/api/v1/routes/1", headers=headers).status_code == 403
-    assert client_with_db.patch("/api/v1/routes/1", json={}, headers=headers).status_code == 403
-    assert client_with_db.patch("/api/v1/routes/1/status", json={}, headers=headers).status_code == 403
-    assert client_with_db.patch("/api/v1/routes/1/supervisor", json={}, headers=headers).status_code == 403
-    assert client_with_db.delete("/api/v1/routes/1", headers=headers).status_code == 403
-    assert client_with_db.get("/api/v1/routes/1/stops", headers=headers).status_code == 403
-    assert client_with_db.post("/api/v1/routes/1/stops", json={}, headers=headers).status_code == 403
-    assert client_with_db.patch("/api/v1/routes/1/stops/reorder", json={"stops": []}, headers=headers).status_code == 403
-    assert client_with_db.delete("/api/v1/routes/1/stops/1", headers=headers).status_code == 403
+    Students need READ access to routes (and their stops) for the subscription
+    flow ("اشترك الآن"), but must never be able to create, update, or delete
+    routes or stops.
+    """
+    student, student_token = _create_user_and_token(db_session, "student_r_rbac@test.edu", RoleEnum.STUDENT)
+    _, ceo_token = _create_user_and_token(db_session, "ceo_r_rbac@test.edu", RoleEnum.CEO)
+    stations = _create_test_stations(db_session)
+    ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Unauthenticated -> 401
-    assert client_with_db.post("/api/v1/routes", json={}).status_code == 401
+    # Seed a route and a stop so student READ requests can be exercised end-to-end
+    created = client_with_db.post(
+        "/api/v1/routes",
+        json={
+            "route_number": "R-RBAC",
+            "name": "RBAC Route",
+            "origin_station_id": stations[0].id,
+            "destination_station_id": stations[1].id,
+            "distance_km": 5.0,
+            "estimated_duration_minutes": 15,
+        },
+        headers=ceo_headers,
+    )
+    assert created.status_code == 201
+    route_id = created.json()["id"]
+
+    stop = client_with_db.post(
+        f"/api/v1/routes/{route_id}/stops",
+        json={"station_id": stations[2].id, "stop_order": 1},
+        headers=ceo_headers,
+    )
+    assert stop.status_code == 201
+    stop_id = stop.json()["id"]
+
+    student_headers = {"Authorization": f"Bearer {student_token}"}
+
+    # Student READ access -> allowed (required by the subscription flow)
+    assert client_with_db.get("/api/v1/routes", headers=student_headers).status_code == 200
+    assert client_with_db.get(f"/api/v1/routes/{route_id}", headers=student_headers).status_code == 200
+    assert client_with_db.get(f"/api/v1/routes/{route_id}/stops", headers=student_headers).status_code == 200
+
+    # Student management access -> 403
+    assert client_with_db.post("/api/v1/routes", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/status", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/supervisor", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.delete(f"/api/v1/routes/{route_id}", headers=student_headers).status_code == 403
+    assert client_with_db.post(f"/api/v1/routes/{route_id}/stops", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/stops/reorder", json={"stops": []}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/stops/{stop_id}", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.delete(f"/api/v1/routes/{route_id}/stops/{stop_id}", headers=student_headers).status_code == 403
+
+    # Unauthenticated -> 401 (all endpoints, including reads)
     assert client_with_db.get("/api/v1/routes").status_code == 401
-    assert client_with_db.get("/api/v1/routes/1").status_code == 401
-    assert client_with_db.patch("/api/v1/routes/1", json={}).status_code == 401
-    assert client_with_db.delete("/api/v1/routes/1").status_code == 401
-    assert client_with_db.get("/api/v1/routes/1/stops").status_code == 401
-    assert client_with_db.post("/api/v1/routes/1/stops", json={}).status_code == 401
+    assert client_with_db.get(f"/api/v1/routes/{route_id}").status_code == 401
+    assert client_with_db.post("/api/v1/routes", json={}).status_code == 401
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}", json={}).status_code == 401
+    assert client_with_db.delete(f"/api/v1/routes/{route_id}").status_code == 401
+    assert client_with_db.get(f"/api/v1/routes/{route_id}/stops").status_code == 401
+    assert client_with_db.post(f"/api/v1/routes/{route_id}/stops", json={}).status_code == 401

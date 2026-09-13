@@ -112,6 +112,14 @@ class SubscriptionDetailResponse(SubscriptionResponse):
     return_boarding_count: int = 0
     last_boarded_at: datetime | None = None
 
+    # CEO-defined duration usage accounting (QR allowance):
+    #   max_qr_usages = duration_days * 2 (two trips per usage day)
+    duration_days: int | None = None
+    max_qr_usages: int | None = None
+    used_qr_usages: int | None = None
+    remaining_qr_usages: int | None = None
+    qr_usages_today: int | None = None
+
 
 class PaginatedSubscriptionResponse(BaseModel):
     """Paginated list of subscriptions."""

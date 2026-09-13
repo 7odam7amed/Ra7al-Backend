@@ -48,6 +48,16 @@ def create_app() -> FastAPI:
                 cors_origins.append(dev_origin)
 
     app.add_middleware(SecurityHeadersMiddleware)
+
+    # NOTE: Starlette applies middleware in reverse registration order, so the
+    # LAST middleware added wraps everything outside it. CORSMiddleware must be
+    # the OUTERMOST layer so that CORS headers are present on every response,
+    # including 500 errors produced by inner exception handlers/middleware.
+    # Without this, an unexpected server error (e.g. a database fault) reaches
+    # the browser without Access-Control-Allow-Origin and is misreported by the
+    # frontend as a CORS/network failure, hiding the real backend error.
+    # This changes ONLY response header behavior - origin policy is unchanged:
+    # allow_origins stays an explicit allow-list (never "*") enforced below.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,

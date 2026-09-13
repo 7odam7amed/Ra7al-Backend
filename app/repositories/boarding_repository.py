@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.exceptions.base import ConflictError
 from app.models.boarding import BoardingRecord
 from app.models.enums import BoardingDirection
+from app.models.subscription import Subscription
 
 
 class BoardingRepository:
@@ -60,6 +61,73 @@ class BoardingRepository:
             ) from exc
         self.db.refresh(record)
         return record
+
+    def count_usages_for_subscription(self, subscription_id: int) -> int:
+        """Count total successful QR usages (boarding records) for a subscription."""
+        stmt = select(func.count(BoardingRecord.id)).where(
+            BoardingRecord.subscription_id == subscription_id
+        )
+        return self.db.execute(stmt).scalar_one()
+
+    def count_usages_for_subscription_on_date(
+        self, subscription_id: int, usage_date: datetime
+    ) -> int:
+        """Count successful QR usages for a subscription on one calendar day.
+
+        ``usage_date`` is timezone-aware; the calendar day is taken in that
+        timezone (production uses UTC).
+        """
+        day_start = usage_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        stmt = select(func.count(BoardingRecord.id)).where(
+            BoardingRecord.subscription_id == subscription_id,
+            BoardingRecord.boarded_at >= day_start,
+            BoardingRecord.boarded_at < day_end,
+        )
+        return self.db.execute(stmt).scalar_one()
+
+    def usage_counts_for_subscriptions_today(
+        self, subscription_ids: list[int]
+    ) -> dict[int, int]:
+        """Batch count of today's successful QR usages per subscription.
+
+        ``today`` is evaluated in UTC, matching scan timestamps which are
+        recorded in UTC.
+        """
+        empty: dict[int, int] = {}
+        if not subscription_ids:
+            return empty
+        now_utc = datetime.now(timezone.utc)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        stmt = (
+            select(BoardingRecord.subscription_id, func.count(BoardingRecord.id))
+            .where(
+                BoardingRecord.subscription_id.in_(subscription_ids),
+                BoardingRecord.boarded_at >= day_start,
+                BoardingRecord.boarded_at < day_end,
+            )
+            .group_by(BoardingRecord.subscription_id)
+        )
+        return {
+            int(sub_id): int(count)
+            for sub_id, count in self.db.execute(stmt).all()
+        }
+
+    def get_subscription_row_for_update(self, subscription_id: int) -> Subscription | None:
+        """Fetch the subscription row with a row-level lock (SELECT ... FOR UPDATE).
+
+        Serializes concurrent scans of the same subscription so usage-limit
+        checks cannot race: the second transaction blocks on this row lock until
+        the first commits or rolls back. SQLite (test DB) ignores the FOR UPDATE
+        clause via its dialect compilation and relies on its single-writer model.
+        """
+        stmt = (
+            select(Subscription)
+            .where(Subscription.id == subscription_id)
+            .with_for_update()
+        )
+        return self.db.execute(stmt).scalars().first()
 
     def get_for_trip(self, trip_id: int) -> list[BoardingRecord]:
         """Fetch all boarding records for a specific trip."""

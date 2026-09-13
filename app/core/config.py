@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     SUPABASE_URL: str | None = None
     SUPABASE_SERVICE_ROLE_KEY: str | None = None
     SUPABASE_STORAGE_BUCKET: str = "id-cards"
+    # Private bucket for bus images. Kept separate from the ID-card bucket so
+    # namespace-scoped objects never mix (production bucket: bus-images).
+    SUPABASE_BUS_IMAGES_BUCKET: str = "bus-images"
 
     # Trusted Proxies (for secure client IP extraction)
     TRUSTED_PROXIES: Annotated[

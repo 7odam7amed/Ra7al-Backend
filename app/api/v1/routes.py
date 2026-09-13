@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import CEO_OR_SUPERVISOR, get_route_service
+from app.api.deps import ANY_AUTHENTICATED_ROLE, CEO_OR_SUPERVISOR, get_route_service
 from app.schemas.route import (
     PaginatedRouteResponse,
     RouteCreateRequest,
@@ -17,7 +17,12 @@ from app.schemas.route_stop import (
 )
 from app.services.route_service import RouteService
 
-routes_router = APIRouter(dependencies=[Depends(CEO_OR_SUPERVISOR)])
+# Route management is restricted to CEO & Supervisor on every endpoint below.
+# Read endpoints additionally accept STUDENT: the student subscription flow
+# ("اشترك الآن") must load routes to pick one when purchasing a plan, so
+# students get READ-ONLY access to routes. All management operations (create,
+# update, delete, stops) remain blocked for students.
+routes_router = APIRouter()
 
 
 @routes_router.post(
@@ -25,6 +30,7 @@ routes_router = APIRouter(dependencies=[Depends(CEO_OR_SUPERVISOR)])
     response_model=RouteResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new bus route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def create_route(
     data: RouteCreateRequest,
@@ -38,7 +44,8 @@ def create_route(
 @routes_router.get(
     "",
     response_model=PaginatedRouteResponse,
-    summary="List all routes with pagination and filters (CEO & Supervisor)",
+    summary="List routes with pagination and filters (CEO, Supervisor & Student read-only)",
+    dependencies=[Depends(ANY_AUTHENTICATED_ROLE)],
 )
 def list_routes(
     page: int = Query(default=1, ge=1, description="Page number"),
@@ -68,7 +75,8 @@ def list_routes(
 @routes_router.get(
     "/{route_id}",
     response_model=RouteResponse,
-    summary="Get route details by ID (CEO & Supervisor)",
+    summary="Get route details by ID (CEO, Supervisor & Student read-only)",
+    dependencies=[Depends(ANY_AUTHENTICATED_ROLE)],
 )
 def get_route_by_id(
     route_id: int,
@@ -83,6 +91,7 @@ def get_route_by_id(
     "/{route_id}",
     response_model=RouteResponse,
     summary="Update route details (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def update_route(
     route_id: int,
@@ -98,6 +107,7 @@ def update_route(
     "/{route_id}/status",
     response_model=RouteResponse,
     summary="Update route operational status (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def update_route_status(
     route_id: int,
@@ -113,6 +123,7 @@ def update_route_status(
     "/{route_id}/supervisor",
     response_model=RouteResponse,
     summary="Assign or reassign supervisor to route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def assign_supervisor(
     route_id: int,
@@ -128,6 +139,7 @@ def assign_supervisor(
     "/{route_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def delete_route(
     route_id: int,
@@ -143,7 +155,8 @@ def delete_route(
 @routes_router.get(
     "/{route_id}/stops",
     response_model=list[RouteStopResponse],
-    summary="List ordered intermediate stops for a route (CEO & Supervisor)",
+    summary="List ordered intermediate stops for a route (CEO, Supervisor & Student read-only)",
+    dependencies=[Depends(ANY_AUTHENTICATED_ROLE)],
 )
 def get_route_stops(
     route_id: int,
@@ -159,6 +172,7 @@ def get_route_stops(
     response_model=RouteStopResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Add an intermediate stop to a route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def add_route_stop(
     route_id: int,
@@ -174,6 +188,7 @@ def add_route_stop(
     "/{route_id}/stops/reorder",
     response_model=list[RouteStopResponse],
     summary="Batch reorder stops on a route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def reorder_route_stops(
     route_id: int,
@@ -189,6 +204,7 @@ def reorder_route_stops(
     "/{route_id}/stops/{route_stop_id}",
     response_model=RouteStopResponse,
     summary="Update single route stop sequence (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def update_route_stop(
     route_id: int,
@@ -205,6 +221,7 @@ def update_route_stop(
     "/{route_id}/stops/{route_stop_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Remove a stop from a route (CEO & Supervisor)",
+    dependencies=[Depends(CEO_OR_SUPERVISOR)],
 )
 def remove_route_stop(
     route_id: int,

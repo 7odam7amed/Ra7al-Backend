@@ -49,6 +49,7 @@ DANGEROUS_EXTENSIONS = {
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 DEFAULT_UPLOAD_DIR = Path("uploads/id_cards")
 DEFAULT_BUCKET_NAME = "id-cards"
+DEFAULT_BUS_IMAGES_BUCKET_NAME = "bus-images"
 
 MEDIA_TYPE_MAP = {
     ".png": "image/png",
@@ -423,6 +424,9 @@ class SupabaseStorageService(StorageService):
             self.bucket_name = (
                 settings.SUPABASE_STORAGE_BUCKET or DEFAULT_BUCKET_NAME
             )
+        self.bus_images_bucket_name = (
+            settings.SUPABASE_BUS_IMAGES_BUCKET or DEFAULT_BUS_IMAGES_BUCKET_NAME
+        )
 
         if not self.supabase_url or not self.service_role_key:
             raise ValueError(
@@ -430,6 +434,17 @@ class SupabaseStorageService(StorageService):
             )
 
         self.storage_base_url = f"{self.supabase_url}/storage/v1"
+
+    def _bucket_for_namespace(self, namespace: str) -> str:
+        """Resolve the target bucket for an upload namespace.
+
+        Bus images MUST be stored in the dedicated bus-images bucket (not the
+        ID-card bucket), and every read/delete/sign operation must resolve the
+        same bucket the object was written to.
+        """
+        if namespace == "bus_images":
+            return self.bus_images_bucket_name
+        return self.bucket_name
 
     def _get_headers(self, content_type: str | None = None) -> dict[str, str]:
         headers = {
@@ -535,7 +550,8 @@ class SupabaseStorageService(StorageService):
             ext, file.content_type or "application/octet-stream"
         )
 
-        url = f"{self.storage_base_url}/object/{self.bucket_name}/{object_key}"
+        bucket_name = self._bucket_for_namespace(namespace)
+        url = f"{self.storage_base_url}/object/{bucket_name}/{object_key}"
         headers = self._get_headers(content_type=content_type)
         headers["x-upsert"] = "true"
 
@@ -547,7 +563,7 @@ class SupabaseStorageService(StorageService):
                         "Supabase storage upload failed (request reached Supabase): "
                         "status_code=%s bucket=%s object_key=%s content_type=%s response=%s",
                         resp.status_code,
-                        self.bucket_name,
+                        bucket_name,
                         object_key,
                         content_type,
                         (resp.text or "")[:1000],
@@ -571,7 +587,8 @@ class SupabaseStorageService(StorageService):
                 return False
             namespace = self._namespace_for_rel_path(relative_path.replace("\\", "/").strip("/"))
             object_key = self._normalize_object_key(relative_path, namespace=namespace)
-            url = f"{self.storage_base_url}/object/{self.bucket_name}/{object_key}"
+            bucket_name = self._bucket_for_namespace(namespace)
+            url = f"{self.storage_base_url}/object/{bucket_name}/{object_key}"
             headers = self._get_headers()
 
             with httpx.Client(timeout=10.0) as client:
@@ -579,7 +596,7 @@ class SupabaseStorageService(StorageService):
                 if resp.status_code in (200, 204):
                     return True
                 # Fallback: batch delete endpoint DELETE /object/{bucket} with prefixes
-                batch_url = f"{self.storage_base_url}/object/{self.bucket_name}"
+                batch_url = f"{self.storage_base_url}/object/{bucket_name}"
                 batch_headers = self._get_headers(content_type="application/json")
                 batch_resp = client.request(
                     "DELETE",
@@ -593,10 +610,18 @@ class SupabaseStorageService(StorageService):
             return False
 
     def _namespace_for_rel_path(self, rel_clean: str) -> str:
-        """Identify the storage namespace from a normalized relative path."""
-        prefix = rel_clean.split("/", 1)[0]
+        """Identify the storage namespace from a normalized relative path.
+
+        Paths are addressed as "uploads/<namespace_dir>/<file>"; the namespace
+        directory may sit at the start or right after the "uploads" prefix.
+        """
+        parts = rel_clean.split("/")
+        if len(parts) >= 2 and parts[0] == "uploads":
+            candidate = parts[1]
+        else:
+            candidate = parts[0] if parts else ""
         for name, ns in UPLOAD_NAMESPACES.items():
-            if ns["local_dir"] == prefix:
+            if ns["local_dir"] == candidate:
                 return name
         return DEFAULT_NAMESPACE
 
@@ -605,8 +630,9 @@ class SupabaseStorageService(StorageService):
         rel_clean = relative_path.replace("\\", "/").strip("/")
         namespace = self._namespace_for_rel_path(rel_clean)
         object_key = self._normalize_object_key(relative_path, namespace=namespace)
+        bucket_name = self._bucket_for_namespace(namespace)
         url = (
-            f"{self.storage_base_url}/object/authenticated/{self.bucket_name}/{object_key}"
+            f"{self.storage_base_url}/object/authenticated/{bucket_name}/{object_key}"
         )
         headers = self._get_headers()
 
@@ -751,7 +777,8 @@ class SupabaseStorageService(StorageService):
         rel_clean = relative_path.replace("\\", "/").strip("/")
         namespace = self._namespace_for_rel_path(rel_clean)
         object_key = self._normalize_object_key(relative_path, namespace=namespace)
-        url = f"{self.storage_base_url}/object/sign/{self.bucket_name}/{object_key}"
+        bucket_name = self._bucket_for_namespace(namespace)
+        url = f"{self.storage_base_url}/object/sign/{bucket_name}/{object_key}"
         headers = self._get_headers(content_type="application/json")
         body = {"expiresIn": expires_in}
 

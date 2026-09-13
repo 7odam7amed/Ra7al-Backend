@@ -117,11 +117,46 @@ class SubscriptionService:
             supervisor_id, subscription.route_id
         )
 
+    @staticmethod
+    def _qr_usage_fields(
+        subscription: Subscription,
+        used_qr_usages: int,
+        qr_usages_today: int,
+    ) -> dict:
+        """Derive the QR usage accounting fields from the plan duration.
+
+        Business rule: each usage day grants two QR usages (outbound + return),
+        so max_qr_usages = duration_days * 2. Calendar days without scans do
+        not consume the allowance.
+        """
+        duration_days = subscription.plan.duration_days if subscription.plan else None
+        if duration_days is not None and duration_days >= 1:
+            max_qr_usages = duration_days * 2
+            remaining = max(max_qr_usages - used_qr_usages, 0)
+            return {
+                "duration_days": duration_days,
+                "max_qr_usages": max_qr_usages,
+                "used_qr_usages": used_qr_usages,
+                "remaining_qr_usages": remaining,
+                "qr_usages_today": qr_usages_today,
+            }
+        # Orphaned plan (deleted): keep the contract but without derived values.
+        return {
+            "duration_days": None,
+            "max_qr_usages": None,
+            "used_qr_usages": used_qr_usages,
+            "remaining_qr_usages": None,
+            "qr_usages_today": qr_usages_today,
+        }
+
     def _build_details(
         self, subscriptions: list[Subscription]
     ) -> list[SubscriptionDetailResponse]:
         """Build list responses with one aggregate query instead of per-row counts."""
         stats = self.boarding_repo.stats_for_subscriptions(
+            [subscription.id for subscription in subscriptions]
+        )
+        today_counts = self.boarding_repo.usage_counts_for_subscriptions_today(
             [subscription.id for subscription in subscriptions]
         )
         details: list[SubscriptionDetailResponse] = []
@@ -136,6 +171,12 @@ class SubscriptionService:
             detail.outbound_boarding_count = int(values["outbound"])
             detail.return_boarding_count = int(values["return"])
             detail.last_boarded_at = values["last_boarded_at"]
+            for key, value in self._qr_usage_fields(
+                subscription,
+                used_qr_usages=int(values["total"]),
+                qr_usages_today=int(today_counts.get(subscription.id, 0)),
+            ).items():
+                setattr(detail, key, value)
             details.append(detail)
         return details
 
@@ -292,6 +333,9 @@ class SubscriptionService:
             sub.id, BoardingDirection.RETURN
         )
         last_boarded = self.boarding_repo.get_last_boarded_at(sub.id)
+        usages_today = self.boarding_repo.count_usages_for_subscription_on_date(
+            sub.id, datetime.now(timezone.utc)
+        )
 
         response = SubscriptionDetailResponse.model_validate(sub)
         response.plan_type = sub.plan.plan_type if sub.plan else None
@@ -301,6 +345,12 @@ class SubscriptionService:
         response.outbound_boarding_count = outbound_count
         response.return_boarding_count = return_count
         response.last_boarded_at = last_boarded
+        for key, value in self._qr_usage_fields(
+            sub,
+            used_qr_usages=total_count,
+            qr_usages_today=usages_today,
+        ).items():
+            setattr(response, key, value)
         return response
 
     def get_subscription_qr(
