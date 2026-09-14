@@ -33,8 +33,6 @@ class PaymentRepository:
                 .joinedload(Trip.supervisor),
                 joinedload(Payment.subscription)
                 .joinedload(Subscription.plan),
-                joinedload(Payment.subscription)
-                .joinedload(Subscription.route),
                 joinedload(Payment.student),
                 joinedload(Payment.verifier),
             )
@@ -142,8 +140,6 @@ class PaymentRepository:
                 .joinedload(Trip.bus),
                 joinedload(Payment.subscription)
                 .joinedload(Subscription.plan),
-                joinedload(Payment.subscription)
-                .joinedload(Subscription.route),
                 joinedload(Payment.student),
                 joinedload(Payment.verifier),
             )
@@ -203,8 +199,6 @@ class PaymentRepository:
                 .joinedload(Trip.bus),
                 joinedload(Payment.subscription)
                 .joinedload(Subscription.plan),
-                joinedload(Payment.subscription)
-                .joinedload(Subscription.route),
                 joinedload(Payment.student),
                 joinedload(Payment.verifier),
             )

@@ -47,12 +47,12 @@ Renew / expire      PATCH /api/v1/subscriptions/{id}/renew
 ## 4. Subscriptions
 
 - Purchase with `POST /subscriptions` (STUDENT only). The subscription starts `PENDING` and becomes `ACTIVE` only when its payment is verified by a CEO/SUPERVISOR.
-- View own list: `GET /subscriptions/my` (includes `duration_days`, `max_qr_usages`, `used_qr_usages`, `remaining_qr_usages`, `qr_usages_today`).
+- View own list: `GET /subscriptions/my` (includes the purchase snapshots `duration_days` / `days_per_week`, the weekly usage-day counters `usage_days_this_week` / `remaining_usage_days_this_week`, and the raw scan counters `used_qr_usages` / `qr_usages_today`).
 - Details: [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md). QR display and rules: [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
 
 ## 5. Reservations
 
-- A reservation books a **seat on one scheduled trip** (`POST /reservations { trip_id }`), separate from the route subscription.
+- A reservation is the student's **daily transportation selection for TOMORROW** (`POST /reservations` with `trip_id` + outbound/return pickup points), independent of the subscription purchase.
 - Trips available for booking: `GET /reservations/available-trips`.
 - Details: [RESERVATIONS.md](RESERVATIONS.md).
 

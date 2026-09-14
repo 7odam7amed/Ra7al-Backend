@@ -45,7 +45,7 @@ def test_subscription_plans_api_crud_and_rbac(
     # 1. Student cannot create plan
     res = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Illegal Plan", "plan_type": "MONTHLY", "duration_days": 30, "price": 500.0},
+        json={"name": "Illegal Plan", "plan_type": "MONTHLY", "duration_days": 30, "days_per_week": 4, "price": 500.0},
         headers=student_headers,
     )
     assert res.status_code == 403
@@ -53,36 +53,39 @@ def test_subscription_plans_api_crud_and_rbac(
     # 2. CEO creates DAILY, WEEKLY, MONTHLY, and TERM plans with CEO-defined durations
     res_daily = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Daily Plan", "plan_type": "DAILY", "duration_days": 1, "price": 45.0},
+        json={"name": "Daily Plan", "plan_type": "DAILY", "duration_days": 1, "days_per_week": 1, "price": 45.0},
         headers=ceo_headers,
     )
     assert res_daily.status_code == 201
     daily_id = res_daily.json()["id"]
     assert res_daily.json()["duration_days"] == 1
+    assert res_daily.json()["days_per_week"] == 1
 
     res_weekly = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Weekly Pass", "plan_type": "WEEKLY", "duration_days": 7, "price": 150.0},
+        json={"name": "Weekly Pass", "plan_type": "WEEKLY", "duration_days": 7, "days_per_week": 4, "price": 150.0},
         headers=ceo_headers,
     )
     assert res_weekly.status_code == 201
     weekly_id = res_weekly.json()["id"]
     assert res_weekly.json()["plan_type"] == "WEEKLY"
     assert res_weekly.json()["duration_days"] == 7
+    assert res_weekly.json()["days_per_week"] == 4
 
     res_monthly = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Monthly Pass", "plan_type": "MONTHLY", "duration_days": 30, "price": 800.0},
+        json={"name": "Monthly Pass", "plan_type": "MONTHLY", "duration_days": 30, "days_per_week": 5, "price": 800.0},
         headers=ceo_headers,
     )
     assert res_monthly.status_code == 201
     monthly_id = res_monthly.json()["id"]
     assert res_monthly.json()["duration_days"] == 30
+    assert res_monthly.json()["days_per_week"] == 5
 
     # A second monthly package with a different custom duration is allowed
     res_monthly_45 = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Monthly Extended", "plan_type": "MONTHLY", "duration_days": 45, "price": 950.0},
+        json={"name": "Monthly Extended", "plan_type": "MONTHLY", "duration_days": 45, "days_per_week": 5, "price": 950.0},
         headers=ceo_headers,
     )
     assert res_monthly_45.status_code == 201
@@ -91,7 +94,7 @@ def test_subscription_plans_api_crud_and_rbac(
     # Custom TERM duration is allowed
     res_term = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Term Pass", "plan_type": "TERM", "duration_days": 120, "price": 2200.0},
+        json={"name": "Term Pass", "plan_type": "TERM", "duration_days": 120, "days_per_week": 5, "price": 2200.0},
         headers=ceo_headers,
     )
     assert res_term.status_code == 201
@@ -101,7 +104,7 @@ def test_subscription_plans_api_crud_and_rbac(
     # duration_days = 0 is rejected
     res_zero = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Zero Plan", "plan_type": "MONTHLY", "duration_days": 0, "price": 100.0},
+        json={"name": "Zero Plan", "plan_type": "MONTHLY", "duration_days": 0, "days_per_week": 4, "price": 100.0},
         headers=ceo_headers,
     )
     assert res_zero.status_code == 422
@@ -109,10 +112,26 @@ def test_subscription_plans_api_crud_and_rbac(
     # negative duration is rejected
     res_neg = client_with_db.post(
         "/api/v1/subscription-plans",
-        json={"name": "Negative Plan", "plan_type": "TERM", "duration_days": -5, "price": 100.0},
+        json={"name": "Negative Plan", "plan_type": "TERM", "duration_days": -5, "days_per_week": 4, "price": 100.0},
         headers=ceo_headers,
     )
     assert res_neg.status_code == 422
+
+    # days_per_week = 0 is rejected
+    res_dpw_zero = client_with_db.post(
+        "/api/v1/subscription-plans",
+        json={"name": "No Usage Plan", "plan_type": "MONTHLY", "duration_days": 30, "days_per_week": 0, "price": 100.0},
+        headers=ceo_headers,
+    )
+    assert res_dpw_zero.status_code == 422
+
+    # days_per_week = 8 is rejected (a week has only 7 days)
+    res_dpw_eight = client_with_db.post(
+        "/api/v1/subscription-plans",
+        json={"name": "Eight Week Plan", "plan_type": "MONTHLY", "duration_days": 30, "days_per_week": 8, "price": 100.0},
+        headers=ceo_headers,
+    )
+    assert res_dpw_eight.status_code == 422
 
     # 3. Student views available plans
     res_student_list = client_with_db.get(
@@ -130,14 +149,15 @@ def test_subscription_plans_api_crud_and_rbac(
     assert res_alias.status_code == 200
     assert len(res_alias.json()) == 5
 
-    # 4. CEO updates plan price
+    # 4. CEO updates plan price and weekly allowance
     res_update = client_with_db.patch(
         f"/api/v1/subscription-plans/{daily_id}",
-        json={"price": 50.0},
+        json={"price": 50.0, "days_per_week": 1},
         headers=ceo_headers,
     )
     assert res_update.status_code == 200
     assert float(res_update.json()["price"]) == 50.0
+    assert res_update.json()["days_per_week"] == 1
 
     # 5. CEO deactivates a plan
     res_deactivate = client_with_db.patch(

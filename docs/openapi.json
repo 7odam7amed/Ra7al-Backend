@@ -588,14 +588,14 @@
         }
       }
     },
-    "/api/v1/users/{user_id}/role": {
-      "put": {
+    "/api/v1/users/{user_id}/id-card/signed-url": {
+      "get": {
         "tags": [
           "Users"
         ],
-        "summary": "Update user role (CEO only)",
-        "description": "Change a user's role. Enforces CEO safety protections.",
-        "operationId": "update_user_role_api_v1_users__user_id__role_put",
+        "summary": "Get temporary signed URL for student ID card (Student owner or CEO only)",
+        "description": "Retrieve authorized temporary signed URL for a student's ID card.",
+        "operationId": "get_user_id_card_signed_url_api_v1_users__user_id__id_card_signed_url_get",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -610,25 +610,29 @@
               "type": "integer",
               "title": "User Id"
             }
+          },
+          {
+            "name": "expires_in",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 300,
+              "minimum": 1,
+              "description": "Signed URL expiry time in seconds (default: 60s, max: 300s)",
+              "default": 60,
+              "title": "Expires In"
+            },
+            "description": "Signed URL expiry time in seconds (default: 60s, max: 300s)"
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UserRoleUpdateRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
+                  "$ref": "#/components/schemas/UserIdCardUrlResponse"
                 }
               }
             }
@@ -644,7 +648,9 @@
             }
           }
         }
-      },
+      }
+    },
+    "/api/v1/users/{user_id}/role": {
       "patch": {
         "tags": [
           "Users"
@@ -761,98 +767,6 @@
       }
     },
     "/api/v1/users/{user_id}/approve": {
-      "put": {
-        "tags": [
-          "Users"
-        ],
-        "summary": "Approve a pending student account (CEO only)",
-        "description": "Approve a pending student account. Status transitions PENDING -> APPROVED.",
-        "operationId": "approve_user_api_v1_users__user_id__approve_put",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "User Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Users"
-        ],
-        "summary": "Approve a pending student account (CEO only)",
-        "description": "Approve a pending student account. Status transitions PENDING -> APPROVED.",
-        "operationId": "approve_user_api_v1_users__user_id__approve_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "User Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
       "patch": {
         "tags": [
           "Users"
@@ -901,132 +815,6 @@
       }
     },
     "/api/v1/users/{user_id}/reject": {
-      "put": {
-        "tags": [
-          "Users"
-        ],
-        "summary": "Reject a pending student account (CEO only)",
-        "description": "Reject a pending student account. Status transitions PENDING -> REJECTED.",
-        "operationId": "reject_user_api_v1_users__user_id__reject_put",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "User Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/UserRejectRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Data"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Users"
-        ],
-        "summary": "Reject a pending student account (CEO only)",
-        "description": "Reject a pending student account. Status transitions PENDING -> REJECTED.",
-        "operationId": "reject_user_api_v1_users__user_id__reject_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "User Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/UserRejectRequest"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "title": "Data"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
       "patch": {
         "tags": [
           "Users"
@@ -1376,8 +1164,8 @@
         "tags": [
           "Buses"
         ],
-        "summary": "Create a new bus in the fleet (CEO only)",
-        "description": "Create a new bus record with vehicle details.",
+        "summary": "Create a new bus in the fleet with an optional image (CEO only)",
+        "description": "Create a new bus record with vehicle details and an optional image upload.\n\nAccepts both ``application/json`` payloads (legacy behavior) and\n``multipart/form-data`` when an image file is uploaded.",
         "operationId": "create_bus_api_v1_buses_post",
         "security": [
           {
@@ -1385,11 +1173,10 @@
           }
         ],
         "requestBody": {
-          "required": true,
           "content": {
-            "application/json": {
+            "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/BusCreateRequest"
+                "$ref": "#/components/schemas/Body_create_bus_api_v1_buses_post"
               }
             }
           }
@@ -1647,6 +1434,202 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/buses/{bus_id}/image": {
+      "get": {
+        "tags": [
+          "Buses"
+        ],
+        "summary": "Stream the bus image (CEO, assigned supervisor, or student with a confirmed reservation)",
+        "description": "Securely stream the bus image with relationship-based access enforcement.",
+        "operationId": "get_bus_image_api_v1_buses__bus_id__image_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Bus Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Buses"
+        ],
+        "summary": "Upload or replace the bus image (CEO only)",
+        "description": "Upload a new bus image; the previous stored object is deleted after a successful replace.",
+        "operationId": "replace_bus_image_api_v1_buses__bus_id__image_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Bus Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_replace_bus_image_api_v1_buses__bus_id__image_patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Buses"
+        ],
+        "summary": "Remove the bus image (CEO only)",
+        "description": "Delete the stored bus image and clear the reference.",
+        "operationId": "remove_bus_image_api_v1_buses__bus_id__image_delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Bus Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/buses/{bus_id}/image/metadata": {
+      "get": {
+        "tags": [
+          "Buses"
+        ],
+        "summary": "Get bus image metadata including the authorized stream URL",
+        "description": "Retrieve image availability metadata for a bus after access enforcement.",
+        "operationId": "get_bus_image_metadata_api_v1_buses__bus_id__image_metadata_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Bus Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BusImageResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -2117,7 +2100,7 @@
         "tags": [
           "Routes"
         ],
-        "summary": "List all routes with pagination and filters (CEO & Supervisor)",
+        "summary": "List routes with pagination and filters (CEO, Supervisor & Student read-only)",
         "description": "Retrieve a paginated list of routes.",
         "operationId": "list_routes_api_v1_routes_get",
         "security": [
@@ -2237,7 +2220,7 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Get route details by ID (CEO & Supervisor)",
+        "summary": "Get route details by ID (CEO, Supervisor & Student read-only)",
         "description": "Retrieve full details of a specific route including origin, destination, and ordered stops.",
         "operationId": "get_route_by_id_api_v1_routes__route_id__get",
         "security": [
@@ -2496,7 +2479,7 @@
         "tags": [
           "Routes"
         ],
-        "summary": "List ordered intermediate stops for a route (CEO & Supervisor)",
+        "summary": "List ordered intermediate stops for a route (CEO, Supervisor & Student read-only)",
         "description": "Retrieve all intermediate stops configured for a route in sequential order.",
         "operationId": "get_route_stops_api_v1_routes__route_id__stops_get",
         "security": [
@@ -3426,8 +3409,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Book a seat on a scheduled trip (Student only)",
-        "description": "Reserve a seat on a scheduled trip for the authenticated student.",
+        "summary": "Create TOMORROW's daily transportation selection (Student only)",
+        "description": "Select tomorrow's trip plus outbound/return pickup points.\n\nRequires an ACTIVE subscription. The service date is always TOMORROW\n(derived server-side); trip and pickup points are validated server-side\nagainst the trip's route.",
         "operationId": "book_trip_api_v1_reservations_post",
         "security": [
           {
@@ -3471,8 +3454,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "List all reservations with filters (CEO & Supervisor only)",
-        "description": "Retrieve all reservations system-wide with comprehensive filtering.",
+        "summary": "List all daily selections with filters (CEO & Supervisor only)",
+        "description": "Retrieve all daily selections system-wide with comprehensive filtering.",
         "operationId": "list_admin_reservations_api_v1_reservations_get",
         "security": [
           {
@@ -3562,6 +3545,44 @@
             "description": "Filter by reservation status"
           },
           {
+            "name": "service_date_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter selections on/after this service date",
+              "title": "Service Date From"
+            },
+            "description": "Filter selections on/after this service date"
+          },
+          {
+            "name": "service_date_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter selections on/before this service date",
+              "title": "Service Date To"
+            },
+            "description": "Filter selections on/before this service date"
+          },
+          {
             "name": "booked_after",
             "in": "query",
             "required": false,
@@ -3624,13 +3645,85 @@
         }
       }
     },
+    "/api/v1/reservations/my/tomorrow": {
+      "get": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Get TOMORROW's daily transportation selection (Student only)",
+        "description": "Retrieve the authenticated student's selection for tomorrow, if any.",
+        "operationId": "get_my_tomorrow_selection_api_v1_reservations_my_tomorrow_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Update TOMORROW's daily transportation selection (Student only)",
+        "description": "Replace tomorrow's existing selection (trip and/or pickup points).",
+        "operationId": "update_my_tomorrow_selection_api_v1_reservations_my_tomorrow_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReservationCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/reservations/available-trips": {
       "get": {
         "tags": [
           "Reservations"
         ],
-        "summary": "List scheduled trips available for booking",
-        "description": "Retrieve scheduled future trips with remaining available seating capacity.",
+        "summary": "List trips available for TOMORROW's selection",
+        "description": "Retrieve tomorrow's scheduled trips with remaining available seating capacity.",
         "operationId": "list_available_trips_api_v1_reservations_available_trips_get",
         "security": [
           {
@@ -3713,8 +3806,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "List authenticated student's own reservations (Student only)",
-        "description": "Retrieve a paginated list of reservations for the logged-in student.",
+        "summary": "List authenticated student's daily selections (Student only)",
+        "description": "Retrieve a paginated list of the logged-in student's daily selections.",
         "operationId": "list_my_reservations_api_v1_reservations_my_get",
         "security": [
           {
@@ -3784,6 +3877,44 @@
               "title": "Trip Id"
             },
             "description": "Filter by trip ID"
+          },
+          {
+            "name": "service_date_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter selections on/after this service date",
+              "title": "Service Date From"
+            },
+            "description": "Filter selections on/after this service date"
+          },
+          {
+            "name": "service_date_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter selections on/before this service date",
+              "title": "Service Date To"
+            },
+            "description": "Filter selections on/before this service date"
           }
         ],
         "responses": {
@@ -3815,8 +3946,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Get reservation details by ID (Student owner or CEO & Supervisor)",
-        "description": "Retrieve full details of a reservation enforcing ownership and permissions.",
+        "summary": "Get daily selection details by ID (Student owner or CEO & Supervisor)",
+        "description": "Retrieve full details of a daily selection enforcing ownership and permissions.",
         "operationId": "get_reservation_by_id_api_v1_reservations__reservation_id__get",
         "security": [
           {
@@ -3863,8 +3994,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Cancel a reservation (Student owner or CEO & Supervisor)",
-        "description": "Cancel an active reservation and release the reserved seat.",
+        "summary": "Cancel a daily selection (Student owner or CEO & Supervisor)",
+        "description": "Cancel an active daily selection and release the reserved seat.",
         "operationId": "cancel_reservation_api_v1_reservations__reservation_id__cancel_patch",
         "security": [
           {
@@ -4513,7 +4644,7 @@
           "Subscription Plans"
         ],
         "summary": "Create a new subscription plan (CEO only)",
-        "description": "Create a new student subscription plan (DAILY, MONTHLY, TERM).",
+        "description": "Create a new student subscription plan (DAILY, WEEKLY, MONTHLY, TERM) with a CEO-defined duration and weekly usage-day allowance.",
         "operationId": "create_subscription_plan_api_v1_subscription_plans_post",
         "security": [
           {
@@ -4682,7 +4813,7 @@
         "tags": [
           "Subscription Plans"
         ],
-        "summary": "Update subscription plan name, price, or status (CEO only)",
+        "summary": "Update subscription plan name, price, duration, weekly allowance, or status (CEO only)",
         "description": "Update editable attributes of an existing subscription plan.",
         "operationId": "update_subscription_plan_api_v1_subscription_plans__plan_id__patch",
         "security": [
@@ -5373,6 +5504,54 @@
         }
       }
     },
+    "/api/v1/subscriptions/{subscription_id}/renew": {
+      "patch": {
+        "tags": [
+          "Subscriptions"
+        ],
+        "summary": "Renew a subscription using its plan's configured duration (owner or CEO)",
+        "description": "Renew a subscription by creating the next cycle from the plan's duration_days.",
+        "operationId": "renew_subscription_api_v1_subscriptions__subscription_id__renew_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subscription_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Subscription Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/subscriptions/{subscription_id}/cancel": {
       "patch": {
         "tags": [
@@ -5847,6 +6026,14 @@
                 "type": "null"
               }
             ]
+          },
+          "pickup_points": {
+            "items": {
+              "$ref": "#/components/schemas/PickupPointResponse"
+            },
+            "type": "array",
+            "title": "Pickup Points",
+            "default": []
           }
         },
         "type": "object",
@@ -5865,7 +6052,7 @@
           "updated_at"
         ],
         "title": "AvailableTripResponse",
-        "description": "Representation of a scheduled trip available for student booking."
+        "description": "Representation of a trip available for TOMORROW's daily selection."
       },
       "BoardingDirection": {
         "type": "string",
@@ -5983,9 +6170,6 @@
             "type": "integer",
             "title": "Subscription Id"
           },
-          "plan_type": {
-            "$ref": "#/components/schemas/SubscriptionPlanType"
-          },
           "route_id": {
             "type": "integer",
             "title": "Route Id"
@@ -6001,13 +6185,34 @@
             "type": "string",
             "format": "date-time",
             "title": "Boarded At"
+          },
+          "usage_days_this_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Days This Week"
+          },
+          "remaining_usage_days_this_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usage Days This Week"
           }
         },
         "type": "object",
         "required": [
           "student",
           "subscription_id",
-          "plan_type",
           "route_id",
           "direction",
           "pickup_point_id",
@@ -6098,6 +6303,112 @@
         "title": "BoardingStudentSummary",
         "description": "Non-sensitive student summary for supervisor boarding response."
       },
+      "Body_create_bus_api_v1_buses_post": {
+        "properties": {
+          "image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image"
+          },
+          "bus_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bus Number"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "license_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License Plate"
+          },
+          "plate_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plate Number"
+          },
+          "capacity": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "type": "object",
+        "title": "Body_create_bus_api_v1_buses_post"
+      },
       "Body_login_api_v1_auth_login_post": {
         "properties": {
           "grant_type": {
@@ -6157,6 +6468,20 @@
         ],
         "title": "Body_login_api_v1_auth_login_post"
       },
+      "Body_replace_bus_image_api_v1_buses__bus_id__image_patch": {
+        "properties": {
+          "image": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Image"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image"
+        ],
+        "title": "Body_replace_bus_image_api_v1_buses__bus_id__image_patch"
+      },
       "Body_upload_id_card_api_v1_auth_upload_id_card_post": {
         "properties": {
           "file": {
@@ -6171,134 +6496,47 @@
         ],
         "title": "Body_upload_id_card_api_v1_auth_upload_id_card_post"
       },
-      "BusCreateRequest": {
+      "BusImageResponse": {
         "properties": {
-          "bus_number": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 50,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Bus Number",
-            "examples": [
-              "BUS-101"
-            ]
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 50,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name",
-            "examples": [
-              "Ra7al Bus 01"
-            ]
-          },
-          "license_plate": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 50,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "License Plate",
-            "examples": [
-              "ABC-1234"
-            ]
-          },
-          "plate_number": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 50,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Plate Number",
-            "examples": [
-              "ABC-1234"
-            ]
-          },
-          "capacity": {
+          "bus_id": {
             "type": "integer",
-            "maximum": 150.0,
-            "exclusiveMinimum": 0.0,
-            "title": "Capacity",
-            "description": "Bus passenger capacity (must be positive, <= 150)",
-            "default": 50,
-            "examples": [
-              50
-            ]
+            "title": "Bus Id"
           },
-          "model": {
+          "has_image": {
+            "type": "boolean",
+            "title": "Has Image"
+          },
+          "image_url": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 100
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Model",
-            "examples": [
-              "Mercedes-Benz Travego"
-            ]
+            "title": "Image Url"
           },
-          "type": {
+          "image_stream_url": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 100
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Type",
-            "examples": [
-              "Coaster"
-            ]
-          },
-          "year": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 2050.0,
-                "minimum": 1990.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Year",
-            "description": "Manufacturing year",
-            "examples": [
-              2022
-            ]
+            "title": "Image Stream Url",
+            "description": "Authorized endpoint that streams the image bytes"
           }
         },
         "type": "object",
-        "title": "BusCreateRequest",
-        "description": "Schema for creating a new bus in the fleet (CEO only)."
+        "required": [
+          "bus_id",
+          "has_image"
+        ],
+        "title": "BusImageResponse",
+        "description": "Metadata describing a stored bus image reference."
       },
       "BusResponse": {
         "properties": {
@@ -6342,6 +6580,17 @@
           },
           "status": {
             "$ref": "#/components/schemas/BusStatus"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
           },
           "created_at": {
             "type": "string",
@@ -6466,9 +6715,16 @@
           "capacity": {
             "anyOf": [
               {
-                "type": "integer",
-                "maximum": 150.0,
-                "exclusiveMinimum": 0.0
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "gt": 0,
+                "le": 150
               },
               {
                 "type": "null"
@@ -6513,9 +6769,16 @@
           "year": {
             "anyOf": [
               {
-                "type": "integer",
-                "maximum": 2050.0,
-                "minimum": 1990.0
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "ge": 1990,
+                "le": 2050
               },
               {
                 "type": "null"
@@ -7499,10 +7762,48 @@
             "type": "integer",
             "exclusiveMinimum": 0.0,
             "title": "Trip Id",
-            "description": "Scheduled Trip ID to reserve",
+            "description": "Scheduled trip ID departing TOMORROW",
             "examples": [
               1
             ]
+          },
+          "outbound_pickup_point_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outbound Pickup Point Id",
+            "description": "Pickup point for the outbound journey (must belong to the trip)",
+            "examples": [
+              3
+            ]
+          },
+          "return_pickup_point_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Pickup Point Id",
+            "description": "Pickup point for the return journey (must belong to the trip)",
+            "examples": [
+              4
+            ]
+          },
+          "direction_mode": {
+            "type": "string",
+            "title": "Direction Mode",
+            "description": "Which journeys are needed: BOTH, OUTBOUND_ONLY, or RETURN_ONLY",
+            "default": "BOTH"
           }
         },
         "type": "object",
@@ -7510,7 +7811,7 @@
           "trip_id"
         ],
         "title": "ReservationCreateRequest",
-        "description": "Schema for booking a seat on a scheduled trip."
+        "description": "Schema for creating/updating a DAILY transportation selection for TOMORROW.\n\nThe service date is NOT accepted from the client: the backend always books\nfor tomorrow (Today -> Tomorrow window), so a student cannot select\narbitrary historical or future dates."
       },
       "ReservationResponse": {
         "properties": {
@@ -7525,6 +7826,42 @@
           "student_id": {
             "type": "integer",
             "title": "Student Id"
+          },
+          "subscription_id": {
+            "type": "integer",
+            "title": "Subscription Id"
+          },
+          "service_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Service Date"
+          },
+          "outbound_pickup_point_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outbound Pickup Point Id"
+          },
+          "return_pickup_point_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Pickup Point Id"
+          },
+          "direction_mode": {
+            "type": "string",
+            "title": "Direction Mode",
+            "default": "BOTH"
           },
           "status": {
             "$ref": "#/components/schemas/ReservationStatus"
@@ -7575,6 +7912,26 @@
                 "type": "null"
               }
             ]
+          },
+          "outbound_pickup_point": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PickupPointResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "return_pickup_point": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PickupPointResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -7582,13 +7939,15 @@
           "id",
           "trip_id",
           "student_id",
+          "subscription_id",
+          "service_date",
           "status",
           "booked_at",
           "created_at",
           "updated_at"
         ],
         "title": "ReservationResponse",
-        "description": "Public representation of a seat reservation."
+        "description": "Public representation of a daily transportation selection."
       },
       "ReservationStatus": {
         "type": "string",
@@ -7598,15 +7957,6 @@
         ],
         "title": "ReservationStatus",
         "description": "Operational status of a seat reservation."
-      },
-      "ReturnPickupMode": {
-        "type": "string",
-        "enum": [
-          "SAME_AS_OUTBOUND",
-          "DIFFERENT"
-        ],
-        "title": "ReturnPickupMode",
-        "description": "Selection mode for return trip pickup point."
       },
       "RoleEnum": {
         "type": "string",
@@ -8401,12 +8751,6 @@
       },
       "SubscriptionCreateRequest": {
         "properties": {
-          "route_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Route Id",
-            "description": "Target route ID"
-          },
           "plan_id": {
             "type": "integer",
             "exclusiveMinimum": 0.0,
@@ -8424,44 +8768,7 @@
               }
             ],
             "title": "Start Date",
-            "description": "Subscription start/service date. Defaults to current date if omitted."
-          },
-          "service_date": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Service Date",
-            "description": "Alias for start_date for daily subscription service date."
-          },
-          "outbound_pickup_point_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Outbound Pickup Point Id",
-            "description": "Selected pickup point for outbound journey"
-          },
-          "return_pickup_mode": {
-            "$ref": "#/components/schemas/ReturnPickupMode",
-            "description": "Return pickup point selection mode",
-            "default": "SAME_AS_OUTBOUND"
-          },
-          "return_pickup_point_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Return Pickup Point Id",
-            "description": "Selected return pickup point (required if return_pickup_mode is DIFFERENT)"
+            "description": "Subscription start date. Defaults to today if omitted; cannot be in the past."
           },
           "payment_method": {
             "$ref": "#/components/schemas/PaymentMethod",
@@ -8479,17 +8786,18 @@
               }
             ],
             "title": "Transaction Reference",
-            "description": "Optional transaction reference for digital payments"
+            "description": "Digital payment code/reference. REQUIRED for VODAFONE_CASH and INSTAPAY; not required (tolerated if provided) for CASH.",
+            "examples": [
+              "VC-123456789"
+            ]
           }
         },
         "type": "object",
         "required": [
-          "route_id",
-          "plan_id",
-          "outbound_pickup_point_id"
+          "plan_id"
         ],
         "title": "SubscriptionCreateRequest",
-        "description": "Payload for student self-subscribing to a route transit plan."
+        "description": "Payload for a student purchasing a subscription plan.\n\nINTENTIONALLY plan-only: plan + start date + payment method (+ digital\npayment reference for digital methods). There is NO route_id, trip_id, or\npickup-point field — daily transportation is selected separately through\nthe daily reservation workflow."
       },
       "SubscriptionDetailResponse": {
         "properties": {
@@ -8500,10 +8808,6 @@
           "student_id": {
             "type": "integer",
             "title": "Student Id"
-          },
-          "route_id": {
-            "type": "integer",
-            "title": "Route Id"
           },
           "plan_id": {
             "type": "integer",
@@ -8529,16 +8833,13 @@
             "format": "date",
             "title": "End Date"
           },
-          "outbound_pickup_point_id": {
+          "duration_days_snapshot": {
             "type": "integer",
-            "title": "Outbound Pickup Point Id"
+            "title": "Duration Days Snapshot"
           },
-          "return_pickup_point_id": {
+          "days_per_week_snapshot": {
             "type": "integer",
-            "title": "Return Pickup Point Id"
-          },
-          "return_pickup_mode": {
-            "$ref": "#/components/schemas/ReturnPickupMode"
+            "title": "Days Per Week Snapshot"
           },
           "payment_id": {
             "anyOf": [
@@ -8574,16 +8875,6 @@
               }
             ]
           },
-          "route": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RouteResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "plan": {
             "anyOf": [
               {
@@ -8598,26 +8889,6 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/PaymentResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "outbound_pickup_point": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PickupPointResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "return_pickup_point": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PickupPointResponse"
               },
               {
                 "type": "null"
@@ -8682,26 +8953,90 @@
               }
             ],
             "title": "Last Boarded At"
+          },
+          "duration_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Days"
+          },
+          "days_per_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Per Week"
+          },
+          "usage_days_this_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage Days This Week"
+          },
+          "remaining_usage_days_this_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining Usage Days This Week"
+          },
+          "used_qr_usages": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Qr Usages"
+          },
+          "qr_usages_today": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qr Usages Today"
           }
         },
         "type": "object",
         "required": [
           "id",
           "student_id",
-          "route_id",
           "plan_id",
           "price_snapshot",
           "start_date",
           "end_date",
-          "outbound_pickup_point_id",
-          "return_pickup_point_id",
-          "return_pickup_mode",
+          "duration_days_snapshot",
+          "days_per_week_snapshot",
           "status",
           "created_at",
           "updated_at"
         ],
         "title": "SubscriptionDetailResponse",
-        "description": "Extended representation of a subscription including boarding statistics and summaries."
+        "description": "Extended subscription representation with usage statistics.\n\nWeekly fields are DAYS, not QR scans: usage_days_this_week counts DISTINCT\ncalendar dates with any successful scan (Mon-Sun, UTC); outbound + return\nscans on the same date count as ONE usage day."
       },
       "SubscriptionPlanCreate": {
         "properties": {
@@ -8714,7 +9049,7 @@
           },
           "plan_type": {
             "$ref": "#/components/schemas/SubscriptionPlanType",
-            "description": "Plan duration type (DAILY, MONTHLY, TERM)"
+            "description": "Plan duration type (DAILY, WEEKLY, MONTHLY, TERM)"
           },
           "price": {
             "anyOf": [
@@ -8738,27 +9073,33 @@
             "default": "EGP"
           },
           "duration_days": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "integer",
+            "maximum": 730.0,
+            "exclusiveMinimum": 0.0,
             "title": "Duration Days",
-            "description": "Duration in days. If omitted, defaults to 1 for DAILY, 30 for MONTHLY, 90 for TERM."
+            "description": "Validity in calendar days (CEO-defined). Examples: DAILY=1, WEEKLY=7, MONTHLY=30 or 45, TERM=90 or 120."
+          },
+          "days_per_week": {
+            "type": "integer",
+            "maximum": 7.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Days Per Week",
+            "description": "Maximum DISTINCT usage days per calendar week (Mon-Sun, UTC). Outbound + return on the same day count as ONE usage day.",
+            "examples": [
+              4
+            ]
           }
         },
         "type": "object",
         "required": [
           "name",
           "plan_type",
-          "price"
+          "price",
+          "duration_days",
+          "days_per_week"
         ],
         "title": "SubscriptionPlanCreate",
-        "description": "Schema for creating a new subscription plan (CEO only)."
+        "description": "Schema for creating a new subscription plan (CEO only).\n\nduration_days: calendar days the subscription stays valid (inclusive of\nthe start date). days_per_week: maximum DISTINCT usage days per calendar\nweek (Mon-Sun, UTC) — outbound + return scans on the same day count as ONE\nusage day. These values are snapshotted onto subscriptions at purchase so\nlater plan edits never change an active student's behavior."
       },
       "SubscriptionPlanResponse": {
         "properties": {
@@ -8776,6 +9117,10 @@
           "duration_days": {
             "type": "integer",
             "title": "Duration Days"
+          },
+          "days_per_week": {
+            "type": "integer",
+            "title": "Days Per Week"
           },
           "price": {
             "type": "string",
@@ -8807,6 +9152,7 @@
           "name",
           "plan_type",
           "duration_days",
+          "days_per_week",
           "price",
           "currency",
           "is_active",
@@ -8835,6 +9181,7 @@
         "type": "string",
         "enum": [
           "DAILY",
+          "WEEKLY",
           "MONTHLY",
           "TERM"
         ],
@@ -8872,6 +9219,34 @@
             ],
             "title": "Price"
           },
+          "duration_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 730.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Days",
+            "description": "Optional new CEO-defined validity in days"
+          },
+          "days_per_week": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 7.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Per Week",
+            "description": "Optional new weekly usage-day allowance"
+          },
           "is_active": {
             "anyOf": [
               {
@@ -8886,7 +9261,7 @@
         },
         "type": "object",
         "title": "SubscriptionPlanUpdate",
-        "description": "Schema for updating an existing subscription plan (CEO only)."
+        "description": "Schema for updating an existing subscription plan (CEO only).\n\nEditing duration_days/days_per_week affects only FUTURE subscriptions:\nactive subscriptions keep the values snapshotted at purchase time."
       },
       "SubscriptionQRResponse": {
         "properties": {
@@ -8896,14 +9271,6 @@
           },
           "plan_type": {
             "$ref": "#/components/schemas/SubscriptionPlanType"
-          },
-          "route_id": {
-            "type": "integer",
-            "title": "Route Id"
-          },
-          "route_name": {
-            "type": "string",
-            "title": "Route Name"
           },
           "valid_from": {
             "type": "string",
@@ -8927,8 +9294,6 @@
         "required": [
           "subscription_id",
           "plan_type",
-          "route_id",
-          "route_name",
           "valid_from",
           "valid_until",
           "qr_payload",
@@ -8946,10 +9311,6 @@
           "student_id": {
             "type": "integer",
             "title": "Student Id"
-          },
-          "route_id": {
-            "type": "integer",
-            "title": "Route Id"
           },
           "plan_id": {
             "type": "integer",
@@ -8975,16 +9336,13 @@
             "format": "date",
             "title": "End Date"
           },
-          "outbound_pickup_point_id": {
+          "duration_days_snapshot": {
             "type": "integer",
-            "title": "Outbound Pickup Point Id"
+            "title": "Duration Days Snapshot"
           },
-          "return_pickup_point_id": {
+          "days_per_week_snapshot": {
             "type": "integer",
-            "title": "Return Pickup Point Id"
-          },
-          "return_pickup_mode": {
-            "$ref": "#/components/schemas/ReturnPickupMode"
+            "title": "Days Per Week Snapshot"
           },
           "payment_id": {
             "anyOf": [
@@ -9020,16 +9378,6 @@
               }
             ]
           },
-          "route": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RouteResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "plan": {
             "anyOf": [
               {
@@ -9049,46 +9397,24 @@
                 "type": "null"
               }
             ]
-          },
-          "outbound_pickup_point": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PickupPointResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "return_pickup_point": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PickupPointResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "type": "object",
         "required": [
           "id",
           "student_id",
-          "route_id",
           "plan_id",
           "price_snapshot",
           "start_date",
           "end_date",
-          "outbound_pickup_point_id",
-          "return_pickup_point_id",
-          "return_pickup_mode",
+          "duration_days_snapshot",
+          "days_per_week_snapshot",
           "status",
           "created_at",
           "updated_at"
         ],
         "title": "SubscriptionResponse",
-        "description": "Standard representation of a subscription record."
+        "description": "Standard representation of a subscription record (a plan purchase)."
       },
       "SubscriptionStatus": {
         "type": "string",
@@ -9161,21 +9487,18 @@
             "type": "integer",
             "title": "Subscription Id"
           },
-          "subscription_type": {
-            "$ref": "#/components/schemas/SubscriptionPlanType"
-          },
           "subscription_status": {
             "$ref": "#/components/schemas/SubscriptionStatus"
           },
-          "start_date": {
+          "service_date": {
             "type": "string",
             "format": "date",
-            "title": "Start Date"
+            "title": "Service Date"
           },
-          "end_date": {
+          "direction_mode": {
             "type": "string",
-            "format": "date",
-            "title": "End Date"
+            "title": "Direction Mode",
+            "default": "BOTH"
           },
           "payment_status": {
             "anyOf": [
@@ -9209,21 +9532,6 @@
             ],
             "title": "Return Pickup"
           },
-          "boarding_count": {
-            "type": "integer",
-            "title": "Boarding Count",
-            "default": 0
-          },
-          "outbound_boarding_count": {
-            "type": "integer",
-            "title": "Outbound Boarding Count",
-            "default": 0
-          },
-          "return_boarding_count": {
-            "type": "integer",
-            "title": "Return Boarding Count",
-            "default": 0
-          },
           "outbound_boarded": {
             "type": "boolean",
             "title": "Outbound Boarded",
@@ -9252,13 +9560,11 @@
           "student_id",
           "student_name",
           "subscription_id",
-          "subscription_type",
           "subscription_status",
-          "start_date",
-          "end_date"
+          "service_date"
         ],
         "title": "SupervisorTripStudentResponse",
-        "description": "Summary of a subscribed student for a supervisor's assigned trip."
+        "description": "Summary of a student's daily selection for a supervisor's assigned trip."
       },
       "TokenResponse": {
         "properties": {
@@ -9725,6 +10031,33 @@
         "type": "object",
         "title": "UniversityUpdateRequest",
         "description": "Schema for updating a university (CEO only)."
+      },
+      "UserIdCardUrlResponse": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "Temporary signed access URL for student ID card"
+          },
+          "signed_url": {
+            "type": "string",
+            "title": "Signed Url",
+            "description": "Temporary signed access URL alias"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In",
+            "description": "Expiration duration in seconds",
+            "default": 60
+          }
+        },
+        "type": "object",
+        "required": [
+          "url",
+          "signed_url"
+        ],
+        "title": "UserIdCardUrlResponse",
+        "description": "Schema for temporary signed ID card access URL."
       },
       "UserRegisterRequest": {
         "properties": {

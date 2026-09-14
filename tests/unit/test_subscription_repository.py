@@ -70,6 +70,7 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("750.00"),
         is_active=True,
     )
@@ -99,32 +100,34 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
     start_date = today
     end_date = today + timedelta(days=30)
 
-    # 1. Create subscription
+    # 1. Create subscription (plan purchase only — no route/pickup coupling)
     sub = repo.create(
         student_id=student.id,
-        route_id=route.id,
         plan_id=plan.id,
         price_snapshot=plan.price,
+        duration_days_snapshot=plan.duration_days,
+        days_per_week_snapshot=plan.days_per_week,
         currency="EGP",
         start_date=start_date,
         end_date=end_date,
-        outbound_pickup_point_id=pickup_1.id,
-        return_pickup_point_id=pickup_2.id,
-        return_pickup_mode=ReturnPickupMode.DIFFERENT,
         qr_token_hash="fake_hash_1234567890abcdef",
         qr_token="fake_token_123",
         status=SubscriptionStatus.PENDING,
     )
     assert sub.id is not None
     assert sub.price_snapshot == Decimal("750.00")
+    assert sub.duration_days_snapshot == 30
+    assert sub.days_per_week_snapshot == 4
     assert sub.currency == "EGP"
     assert sub.status == SubscriptionStatus.PENDING
+    assert sub.route_id is None
+    assert sub.outbound_pickup_point_id is None
+    assert sub.return_pickup_point_id is None
 
     # 2. Get by ID
     fetched = repo.get_by_id(sub.id, eager=True)
     assert fetched is not None
     assert fetched.student.id == student.id
-    assert fetched.route.id == route.id
     assert fetched.plan.id == plan.id
 
     # 3. Get by QR Token Hash
@@ -135,7 +138,6 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
     # 4. Pending payment attempts reserve the selected date range.
     overlap = repo.find_overlapping_active_subscription(
         student_id=student.id,
-        route_id=route.id,
         start_date=start_date,
         end_date=end_date,
     )
@@ -146,7 +148,6 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
     repo.update_status(sub, SubscriptionStatus.ACTIVE)
     overlap_active = repo.find_overlapping_active_subscription(
         student_id=student.id,
-        route_id=route.id,
         start_date=start_date + timedelta(days=5),
         end_date=end_date + timedelta(days=5),
     )
@@ -178,7 +179,6 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
         page=1,
         page_size=10,
         student_id=student.id,
-        route_id=route.id,
         status=SubscriptionStatus.ACTIVE,
     )
     assert total_ceo == 1

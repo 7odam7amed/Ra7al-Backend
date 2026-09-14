@@ -148,7 +148,7 @@ Returns the current user profile (role, status, university info). Use `role` to 
 - **Pagination:** list endpoints return `{ items, total, page, page_size, total_pages }` with `page`/`page_size` query params (max 100).
 - **Dates:** timestamps are ISO-8601 with timezone; subscription dates are plain `YYYY-MM-DD`.
 - **Images are never public URLs.** Buses expose `image_url` as an internal storage reference (may be `null`) — display images through `GET /api/v1/buses/{bus_id}/image`, which streams bytes after access checks. ID cards likewise stream via `/api/v1/users/{user_id}/id-card` or a short-lived signed URL. See [FILE_UPLOADS.md](FILE_UPLOADS.md).
-- **QR payload is opaque.** Render `qr_payload` into a QR image; never parse or count usages client-side. The backend is the single source of truth for usage allowances (`max_qr_usages`, `remaining_qr_usages`, `qr_usages_today` on subscription details).
+- **QR payload is opaque.** Render `qr_payload` into a QR image; never parse or count usages client-side. The backend is the single source of truth for the weekly usage-day allowance (`usage_days_this_week` / `remaining_usage_days_this_week` on subscription details and boarding responses; `used_qr_usages` and `qr_usages_today` are raw scan counters, not the allowance).
 - **Rate limits:** login/register 5 req/min/IP, ID-card upload 10/min, bus-image upload 20/min, boarding scan 60/min. Exceeding them returns `429` with a `Retry-After` header.
 - **No refresh tokens:** on `401`, redirect to login.
 

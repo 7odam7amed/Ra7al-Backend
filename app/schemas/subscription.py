@@ -1,47 +1,33 @@
 from datetime import date, datetime
 from decimal import Decimal
 import math
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     BoardingDirection,
     PaymentMethod,
     PaymentStatus,
-    ReturnPickupMode,
     SubscriptionPlanType,
     SubscriptionStatus,
 )
 from app.schemas.payment import PaymentResponse
-from app.schemas.pickup_point import PickupPointResponse
-from app.schemas.route import RouteResponse
 from app.schemas.subscription_plan import SubscriptionPlanResponse
 from app.schemas.user import UserResponse
 
 
 class SubscriptionCreateRequest(BaseModel):
-    """Payload for student self-subscribing to a route transit plan."""
+    """Payload for a student purchasing a subscription plan.
 
-    route_id: int = Field(..., gt=0, description="Target route ID")
+    INTENTIONALLY plan-only: plan + start date + payment method (+ digital
+    payment reference for digital methods). There is NO route_id, trip_id, or
+    pickup-point field — daily transportation is selected separately through
+    the daily reservation workflow.
+    """
+
     plan_id: int = Field(..., gt=0, description="Selected subscription plan ID")
     start_date: date | None = Field(
         default=None,
-        description="Subscription start/service date. Defaults to current date if omitted.",
-    )
-    service_date: date | None = Field(
-        default=None,
-        description="Alias for start_date for daily subscription service date.",
-    )
-    outbound_pickup_point_id: int = Field(
-        ..., gt=0, description="Selected pickup point for outbound journey"
-    )
-    return_pickup_mode: ReturnPickupMode = Field(
-        default=ReturnPickupMode.SAME_AS_OUTBOUND,
-        description="Return pickup point selection mode",
-    )
-    return_pickup_point_id: int | None = Field(
-        default=None,
-        gt=0,
-        description="Selected return pickup point (required if return_pickup_mode is DIFFERENT)",
+        description="Subscription start date. Defaults to today if omitted; cannot be in the past.",
     )
     payment_method: PaymentMethod = Field(
         default=PaymentMethod.CASH,
@@ -50,43 +36,30 @@ class SubscriptionCreateRequest(BaseModel):
     transaction_reference: str | None = Field(
         default=None,
         max_length=100,
-        description="Optional transaction reference for digital payments",
+        description=(
+            "Digital payment code/reference. REQUIRED for VODAFONE_CASH and "
+            "INSTAPAY; not required (tolerated if provided) for CASH."
+        ),
+        examples=["VC-123456789"],
     )
-
-    @model_validator(mode="after")
-    def validate_requested_dates(self) -> "SubscriptionCreateRequest":
-        if (
-            self.start_date is not None
-            and self.service_date is not None
-            and self.start_date != self.service_date
-        ):
-            raise ValueError("start_date and service_date must match when both are supplied")
-        if (
-            self.return_pickup_mode == ReturnPickupMode.DIFFERENT
-            and self.return_pickup_point_id is None
-        ):
-            raise ValueError(
-                "return_pickup_point_id is required when return_pickup_mode is DIFFERENT"
-            )
-        return self
 
 
 class SubscriptionResponse(BaseModel):
-    """Standard representation of a subscription record."""
+    """Standard representation of a subscription record (a plan purchase)."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     student_id: int
-    route_id: int
     plan_id: int
     price_snapshot: Decimal
     currency: str = "EGP"
     start_date: date
     end_date: date
-    outbound_pickup_point_id: int
-    return_pickup_point_id: int
-    return_pickup_mode: ReturnPickupMode
+    # Plan configuration snapshots (fixed at purchase; CEO plan edits do not
+    # mutate active subscriptions).
+    duration_days_snapshot: int
+    days_per_week_snapshot: int
     payment_id: int | None = None
     status: SubscriptionStatus
     created_at: datetime
@@ -94,15 +67,17 @@ class SubscriptionResponse(BaseModel):
 
     # Optional nested details
     student: UserResponse | None = None
-    route: RouteResponse | None = None
     plan: SubscriptionPlanResponse | None = None
     payment: PaymentResponse | None = None
-    outbound_pickup_point: PickupPointResponse | None = None
-    return_pickup_point: PickupPointResponse | None = None
 
 
 class SubscriptionDetailResponse(SubscriptionResponse):
-    """Extended representation of a subscription including boarding statistics and summaries."""
+    """Extended subscription representation with usage statistics.
+
+    Weekly fields are DAYS, not QR scans: usage_days_this_week counts DISTINCT
+    calendar dates with any successful scan (Mon-Sun, UTC); outbound + return
+    scans on the same date count as ONE usage day.
+    """
 
     plan_type: SubscriptionPlanType | None = None
     price: Decimal | None = None
@@ -112,12 +87,14 @@ class SubscriptionDetailResponse(SubscriptionResponse):
     return_boarding_count: int = 0
     last_boarded_at: datetime | None = None
 
-    # CEO-defined duration usage accounting (QR allowance):
-    #   max_qr_usages = duration_days * 2 (two trips per usage day)
+    # Weekly usage accounting (days, not scans):
     duration_days: int | None = None
-    max_qr_usages: int | None = None
+    days_per_week: int | None = None
+    usage_days_this_week: int | None = None
+    remaining_usage_days_this_week: int | None = None
+
+    # Raw scan counters (distinct from usage days):
     used_qr_usages: int | None = None
-    remaining_qr_usages: int | None = None
     qr_usages_today: int | None = None
 
 
@@ -153,8 +130,6 @@ class SubscriptionQRResponse(BaseModel):
 
     subscription_id: int
     plan_type: SubscriptionPlanType
-    route_id: int
-    route_name: str
     valid_from: date
     valid_until: date
     qr_payload: str

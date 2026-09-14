@@ -8,6 +8,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     text,
@@ -15,19 +16,23 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
-from app.models.enums import ReturnPickupMode, SubscriptionStatus
+from app.models.enums import SubscriptionStatus
 
 if TYPE_CHECKING:
     from app.models.boarding import BoardingRecord
     from app.models.payment import Payment
-    from app.models.pickup_point import PickupPoint
-    from app.models.route import Route
     from app.models.subscription_plan import SubscriptionPlan
     from app.models.user import User
 
 
 class Subscription(BaseModel):
-    """Subscription model representing a student's route transit plan."""
+    """Subscription model representing a student's purchased transit plan.
+
+    A subscription is ONLY a plan purchase: which plan, for which validity
+    window, and its payment lifecycle. It intentionally carries NO route, trip,
+    or pickup-point selection; daily transportation choices (trip + outbound +
+    return pickup points) are made per-day through Reservations.
+    """
 
     __tablename__ = "subscriptions"
     __table_args__ = (
@@ -37,8 +42,12 @@ class Subscription(BaseModel):
         ),
         CheckConstraint("price_snapshot > 0", name="chk_subscription_price_positive"),
         CheckConstraint(
-            "return_pickup_mode IN ('SAME_AS_OUTBOUND', 'DIFFERENT')",
-            name="chk_subscription_return_pickup_mode",
+            "duration_days_snapshot > 0",
+            name="chk_subscription_duration_days_positive",
+        ),
+        CheckConstraint(
+            "days_per_week_snapshot > 0",
+            name="chk_subscription_days_per_week_positive",
         ),
         CheckConstraint(
             "status IN ('PENDING', 'ACTIVE', 'EXPIRED', 'CANCELLED')",
@@ -49,8 +58,8 @@ class Subscription(BaseModel):
             "student_id",
             "route_id",
             unique=True,
-            postgresql_where=text("status IN ('PENDING', 'ACTIVE')"),
-            sqlite_where=text("status IN ('PENDING', 'ACTIVE')"),
+            postgresql_where=text("status IN ('PENDING', 'ACTIVE') AND route_id IS NOT NULL"),
+            sqlite_where=text("status IN ('PENDING', 'ACTIVE') AND route_id IS NOT NULL"),
         ),
     )
 
@@ -59,10 +68,14 @@ class Subscription(BaseModel):
         index=True,
         nullable=False,
     )
-    route_id: Mapped[int] = mapped_column(
+    # Legacy columns from the pre-refactor schema. New subscriptions never set
+    # them: route/trip/pickup selection happens per-day on reservations. They
+    # are kept (nullable) so historical rows survive the migration with their
+    # referential integrity intact.
+    route_id: Mapped[int | None] = mapped_column(
         ForeignKey("routes.id", ondelete="RESTRICT"),
         index=True,
-        nullable=False,
+        nullable=True,
     )
     plan_id: Mapped[int] = mapped_column(
         ForeignKey("subscription_plans.id", ondelete="RESTRICT"),
@@ -79,6 +92,10 @@ class Subscription(BaseModel):
         server_default="EGP",
         nullable=False,
     )
+    # Plan configuration snapshots taken at subscription creation so later CEO
+    # plan edits never mutate an existing student's validity or weekly limits.
+    duration_days_snapshot: Mapped[int] = mapped_column(Integer, nullable=False)
+    days_per_week_snapshot: Mapped[int] = mapped_column(Integer, nullable=False)
     start_date: Mapped[date] = mapped_column(
         Date,
         index=True,
@@ -89,23 +106,15 @@ class Subscription(BaseModel):
         index=True,
         nullable=False,
     )
-    outbound_pickup_point_id: Mapped[int] = mapped_column(
+    # Legacy pickup-point selection columns (pre-refactor), kept for historical
+    # rows; new subscriptions leave them NULL.
+    outbound_pickup_point_id: Mapped[int | None] = mapped_column(
         ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
-    return_pickup_point_id: Mapped[int] = mapped_column(
+    return_pickup_point_id: Mapped[int | None] = mapped_column(
         ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    return_pickup_mode: Mapped[ReturnPickupMode] = mapped_column(
-        Enum(
-            ReturnPickupMode,
-            name="return_pickup_mode_enum",
-            native_enum=False,
-            values_callable=lambda obj: [e.value for e in obj],
-        ),
-        default=ReturnPickupMode.SAME_AS_OUTBOUND,
-        nullable=False,
+        nullable=True,
     )
     payment_id: Mapped[int | None] = mapped_column(
         ForeignKey("payments.id", ondelete="SET NULL", use_alter=True, name="fk_subscriptions_payment_id"),
@@ -136,18 +145,11 @@ class Subscription(BaseModel):
 
     # Relationships
     student: Mapped["User"] = relationship("User", foreign_keys=[student_id])
-    route: Mapped["Route"] = relationship("Route", foreign_keys=[route_id])
     plan: Mapped["SubscriptionPlan"] = relationship(
         "SubscriptionPlan", back_populates="subscriptions", foreign_keys=[plan_id]
     )
     payment: Mapped["Payment | None"] = relationship(
         "Payment", foreign_keys=[payment_id], post_update=True
-    )
-    outbound_pickup_point: Mapped["PickupPoint"] = relationship(
-        "PickupPoint", foreign_keys=[outbound_pickup_point_id]
-    )
-    return_pickup_point: Mapped["PickupPoint"] = relationship(
-        "PickupPoint", foreign_keys=[return_pickup_point_id]
     )
     boarding_records: Mapped[list["BoardingRecord"]] = relationship(
         "BoardingRecord",
@@ -158,5 +160,5 @@ class Subscription(BaseModel):
     def __repr__(self) -> str:
         return (
             f"<Subscription id={self.id} student_id={self.student_id} "
-            f"route_id={self.route_id} plan_id={self.plan_id} status={self.status}>"
+            f"plan_id={self.plan_id} status={self.status}>"
         )

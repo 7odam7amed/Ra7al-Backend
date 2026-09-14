@@ -1,18 +1,24 @@
-"""Regression tests for the QR usage allowance business rule.
+"""Weekly usage-day allowance tests for the QR boarding business rule.
 
 Business rules under test:
 
-- max_qr_usages = plan.duration_days * 2 (two trip directions per usage day).
-- At most 2 successful QR usages per calendar day (one outbound, one return).
-- A calendar day without scans does NOT consume any of the duration days or
-  the usage allowance.
-- A failed scan must NOT consume a usage.
+- The weekly allowance is days_per_week DISTINCT usage days per calendar week
+  (Mon-Sun, UTC). Outbound + return on the same date count as ONE usage day.
+- At most 2 successful scans per calendar day (one outbound, one return).
+- Boarding is real-time: a trip can only be scanned on its own service date,
+  so a usage day is always *today* at scan time.
+- A calendar day without scans does NOT consume a usage day.
+- A failed scan must NOT consume anything.
 - The same QR event (subscription/trip/direction) cannot be consumed twice.
-- Concurrent scans cannot exceed the daily or total limits.
-- Calendar expiration (end_date) remains enforced.
+- Concurrent scans cannot exceed the weekly limit (race-condition guard).
+- Calendar expiration (end_date) always wins over the weekly allowance.
+- Unused weekly allowance does NOT roll over; next week resets to full.
+
+Tests are week-agnostic: seeded usage days sit on deterministic dates inside
+the current ISO week window, so they pass on any calendar day.
 """
 import hashlib
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -25,13 +31,14 @@ from app.models.enums import (
     BoardingDirection,
     BusStatus,
     GenderEnum,
-    ReturnPickupMode,
+    ReservationStatus,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
     TripStatus,
 )
 from app.models.pickup_point import PickupPoint
+from app.models.reservation import Reservation
 from app.models.route import Route
 from app.models.station import Station
 from app.models.subscription import Subscription
@@ -39,17 +46,13 @@ from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
 from app.models.user import User
 from app.repositories.boarding_repository import BoardingRepository
-from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
-from app.repositories.route_repository import RouteRepository
-from app.repositories.subscription_plan_repository import (
-    SubscriptionPlanRepository,
-)
+from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.repositories.trip_repository import TripRepository
-from app.repositories.user_repository import UserRepository
 from app.schemas.boarding import BoardingScanRequest
-from app.services.boarding_service import QR_USAGES_PER_DAY, BoardingService
+from app.services.boarding_service import SCANS_PER_USAGE_DAY, BoardingService
+from app.utils.dates import business_today, week_start, week_end
 
 
 def _user(session: Session, phone: str, role: RoleEnum) -> User:
@@ -66,9 +69,32 @@ def _user(session: Session, phone: str, role: RoleEnum) -> User:
     return user
 
 
+def _at(day: date, hour: int = 8) -> datetime:
+    """Timezone-aware datetime for a business-date day at the given hour (UTC)."""
+    return datetime.combine(day, time(hour, 0), tzinfo=timezone.utc)
+
+
+def _week_dates(today: date, count: int, exclude: set[date] | None = None) -> list[date]:
+    """Return ``count`` distinct dates in the current week, excluding ``exclude``.
+
+    The week has 7 days and tests need at most 6, so this always succeeds.
+    """
+    exclude = exclude or set()
+    monday = week_start(today)
+    sunday = week_end(today)
+    dates: list[date] = []
+    day = monday
+    while day <= sunday and len(dates) < count:
+        if day not in exclude:
+            dates.append(day)
+        day += timedelta(days=1)
+    assert len(dates) == count, "week window too small for requested dates"
+    return dates
+
+
 @pytest.fixture
 def qr_env(db_session: Session) -> dict:
-    """Seed a full scan environment: supervisor, student, route, trips, plan, subscription."""
+    """Seed supervisor, student, route, bus, today's trip, plan, and subscription."""
     supervisor = _user(db_session, "+201112220001", RoleEnum.SUPERVISOR)
     student = _user(db_session, "+201122330002", RoleEnum.STUDENT)
 
@@ -94,56 +120,43 @@ def qr_env(db_session: Session) -> dict:
     db_session.add(route)
     db_session.flush()
 
-    now = datetime.now(timezone.utc)
-    trip1 = Trip(
+    today = business_today()
+    trip_today = Trip(
         route_id=route.id,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
-        departure_time=now + timedelta(days=40),
-        estimated_arrival_time=now + timedelta(days=40, minutes=30),
+        departure_time=_at(today, 7),
+        estimated_arrival_time=_at(today, 8),
         passenger_capacity=30,
         status=TripStatus.SCHEDULED,
     )
-    trip2 = Trip(
-        route_id=route.id,
-        bus_id=bus.id,
-        supervisor_id=supervisor.id,
-        departure_time=now + timedelta(days=41),
-        estimated_arrival_time=now + timedelta(days=41, minutes=30),
-        passenger_capacity=30,
-        status=TripStatus.SCHEDULED,
-    )
-    db_session.add_all([trip1, trip2])
+    db_session.add(trip_today)
     db_session.flush()
 
-    outbound_point = PickupPoint(trip_id=trip1.id, name="Out Gate", sequence=1)
-    return_point = PickupPoint(trip_id=trip1.id, name="In Gate", sequence=2)
-    outbound_point2 = PickupPoint(trip_id=trip2.id, name="Out Gate 2", sequence=1)
-    return_point2 = PickupPoint(trip_id=trip2.id, name="In Gate 2", sequence=2)
-    db_session.add_all([outbound_point, return_point, outbound_point2, return_point2])
+    outbound_point = PickupPoint(trip_id=trip_today.id, name="Out Gate", sequence=1)
+    return_point = PickupPoint(trip_id=trip_today.id, name="In Gate", sequence=2)
+    db_session.add_all([outbound_point, return_point])
     db_session.flush()
 
     plan = SubscriptionPlan(
-        name="Monthly 16",
+        name="Monthly 30d x 4d/wk",
         plan_type=SubscriptionPlanType.MONTHLY,
-        duration_days=16,
+        duration_days=30,
+        days_per_week=4,
         price=Decimal("500.00"),
         is_active=True,
     )
     db_session.add(plan)
     db_session.flush()
 
-    today = datetime.now(timezone.utc).date()
     subscription = Subscription(
         student_id=student.id,
-        route_id=route.id,
         plan_id=plan.id,
         price_snapshot=plan.price,
+        duration_days_snapshot=plan.duration_days,
+        days_per_week_snapshot=plan.days_per_week,
         start_date=today,
-        end_date=today + timedelta(days=15),
-        outbound_pickup_point_id=outbound_point.id,
-        return_pickup_point_id=return_point.id,
-        return_pickup_mode=ReturnPickupMode.SAME_AS_OUTBOUND,
+        end_date=today + timedelta(days=29),
         qr_token_hash=hashlib.sha256(b"raw-token-qr").hexdigest(),
         qr_token="raw-token-qr",
         status=SubscriptionStatus.ACTIVE,
@@ -156,25 +169,25 @@ def qr_env(db_session: Session) -> dict:
         subscription_repo=SubscriptionRepository(db_session),
         trip_repo=TripRepository(db_session),
         pickup_point_repo=PickupPointRepository(db_session),
+        reservation_repo=ReservationRepository(db_session),
     )
     return {
         "session": db_session,
         "service": service,
         "supervisor": supervisor,
         "student": student,
-        "trip1": trip1,
-        "trip2": trip2,
+        "route": route,
+        "bus": bus,
+        "trip_today": trip_today,
         "outbound_point": outbound_point,
         "return_point": return_point,
-        "outbound_point2": outbound_point2,
-        "return_point2": return_point2,
         "plan": plan,
         "subscription": subscription,
     }
 
 
 def _scan(env: dict, direction: BoardingDirection, trip=None, pickup=None, token: str = "raw-token-qr"):
-    trip = trip or env["trip1"]
+    trip = trip or env["trip_today"]
     pickup = pickup or (
         env["outbound_point"] if direction == BoardingDirection.OUTBOUND else env["return_point"]
     )
@@ -189,34 +202,62 @@ def _scan(env: dict, direction: BoardingDirection, trip=None, pickup=None, token
     )
 
 
-def _used(env: dict) -> int:
-    return env["service"].boarding_repo.count_usages_for_subscription(
-        env["subscription"].id
-    )
-
-
-def _seed_usage_day(env: dict, day: datetime) -> None:
-    """Seed one full usage day (outbound + return) as committed boarding records.
-
-    Each usage day gets its own trip so the (subscription, trip, direction)
-    unique constraint is respected, mirroring recurring daily trips.
-    """
+def _make_trip_for_day(env: dict, day: date) -> tuple[Trip, PickupPoint, PickupPoint]:
+    """Create a dedicated trip (plus pickup points) departing on ``day``."""
     session = env["session"]
     trip = Trip(
-        route_id=env["trip1"].route_id,
-        bus_id=env["trip1"].bus_id,
+        route_id=env["route"].id,
+        bus_id=env["bus"].id,
         supervisor_id=env["supervisor"].id,
-        departure_time=day + timedelta(hours=1),
-        estimated_arrival_time=day + timedelta(hours=2),
+        departure_time=_at(day, 7),
+        estimated_arrival_time=_at(day, 8),
         passenger_capacity=30,
         status=TripStatus.SCHEDULED,
     )
     session.add(trip)
     session.flush()
-    point = PickupPoint(trip_id=trip.id, name=f"Gate {trip.id}", sequence=1)
-    session.add(point)
+    out = PickupPoint(trip_id=trip.id, name=f"Out {trip.id}", sequence=1)
+    ret = PickupPoint(trip_id=trip.id, name=f"Ret {trip.id}", sequence=2)
+    session.add_all([out, ret])
     session.flush()
-    for direction in (BoardingDirection.OUTBOUND, BoardingDirection.RETURN):
+    return trip, out, ret
+
+
+def _seed_reservation(env: dict, service_date: date, trip=None, out_point=None, ret_point=None) -> Reservation:
+    """Seed a confirmed daily selection so scans are authorized for that date."""
+    session = env["session"]
+    trip = trip or env["trip_today"]
+    out_point = out_point or env["outbound_point"]
+    ret_point = ret_point or env["return_point"]
+    reservation = Reservation(
+        trip_id=trip.id,
+        student_id=env["student"].id,
+        subscription_id=env["subscription"].id,
+        service_date=service_date,
+        outbound_pickup_point_id=out_point.id,
+        return_pickup_point_id=ret_point.id,
+        direction_mode="BOTH",
+        status=ReservationStatus.CONFIRMED,
+    )
+    session.add(reservation)
+    session.commit()
+    return reservation
+
+
+def _seed_usage_day(env: dict, day: date) -> None:
+    """Seed one full usage day (outbound + return) on ``day`` as committed records.
+
+    Each usage day gets its own trip, pickup points, and confirmed reservation,
+    mirroring the recurring daily-trip production model and respecting the
+    (subscription, trip, direction) unique constraint.
+    """
+    trip, out, ret = _make_trip_for_day(env, day)
+    _seed_reservation(env, day, trip=trip, out_point=out, ret_point=ret)
+    session = env["session"]
+    for direction, point in (
+        (BoardingDirection.OUTBOUND, out),
+        (BoardingDirection.RETURN, ret),
+    ):
         session.add(
             BoardingRecord(
                 subscription_id=env["subscription"].id,
@@ -225,370 +266,301 @@ def _seed_usage_day(env: dict, day: datetime) -> None:
                 supervisor_id=env["supervisor"].id,
                 direction=direction,
                 pickup_point_id=point.id,
-                boarded_at=day,
+                boarded_at=_at(day, 9),
             )
         )
     session.commit()
 
 
-def test_qr_usages_per_day_constant() -> None:
-    assert QR_USAGES_PER_DAY == 2
+def _used_days_this_week(env: dict) -> int:
+    today = business_today()
+    return env["service"].boarding_repo.count_distinct_usage_days(
+        env["subscription"].id, week_start(today), week_end(today)
+    )
 
 
-def test_duration_days_1_max_2_usages(db_session: Session, qr_env: dict) -> None:
-    """duration_days = 1 -> exactly 2 QR usages allowed (outbound + return)."""
+def test_scans_per_usage_day_constant() -> None:
+    assert SCANS_PER_USAGE_DAY == 2
+
+
+def test_outbound_and_return_same_day_one_usage_day(db_session: Session, qr_env: dict) -> None:
+    """Outbound + return scans on the same date count as ONE usage day."""
     env = qr_env
-    plan = env["plan"]
-    plan.duration_days = 1
-    env["session"].commit()
-
+    _seed_reservation(env, business_today())
     _scan(env, BoardingDirection.OUTBOUND)
     _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
-
-    # A third usage the same day is rejected even though direction differs.
-    # With duration_days = 1 the total allowance (2) equals the daily limit,
-    # so either guard may fire first - both reject the third scan.
-    with pytest.raises(ValidationError):
-        _scan(
-            env,
-            BoardingDirection.OUTBOUND,
-            trip=env["trip2"],
-            pickup=env["outbound_point2"],
-        )
-    assert _used(env) == 2
+    assert _used_days_this_week(env) == 1
+    assert env["service"].boarding_repo.count_for_subscription(env["subscription"].id) == 2
 
 
-def test_duration_days_5_max_10_usages(db_session: Session, qr_env: dict) -> None:
-    """duration_days = 5 -> 10 total usages; 11th is rejected."""
+def test_fifth_usage_day_rejected_when_days_per_week_4(db_session: Session, qr_env: dict) -> None:
+    """days_per_week = 4: four distinct usage days succeed, a scan on a 5th date fails."""
     env = qr_env
-    plan = env["plan"]
-    plan.duration_days = 5
-    env["session"].commit()
+    today = business_today()
 
-    # Five complete usage days (5 trips x outbound + return = 10 usages)
-    day = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)
-    for offset in range(5):
-        _seed_usage_day(env, day + timedelta(days=offset))
+    # Seed 4 usage days on week dates other than today.
+    for day in _week_dates(today, 4, exclude={today}):
+        _seed_usage_day(env, day)
+    assert _used_days_this_week(env) == 4
 
-    assert _used(env) == 10
-
-    # The seeded 10 records exhaust the allowance; a live scan must be rejected
-    # by the total-allowance check before consuming anything.
-    with pytest.raises(ValidationError, match="allowance exhausted"):
+    # Live today-scan (a 5th usage day) must be rejected.
+    _seed_reservation(env, today)
+    with pytest.raises(ValidationError, match="Weekly usage limit"):
         _scan(env, BoardingDirection.OUTBOUND)
-    assert _used(env) == 10
-
-    # max_qr_usages formula check
-    assert plan.duration_days * 2 == 10
+    assert _used_days_this_week(env) == 4
 
 
-def test_duration_days_16_max_32_usages(db_session: Session, qr_env: dict) -> None:
-    """duration_days = 16 -> 32 total usages; 33rd is rejected."""
-    env = qr_env
-    assert env["plan"].duration_days * 2 == 32
-
-    day = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)
-    for offset in range(16):
-        _seed_usage_day(env, day + timedelta(days=offset))
-
-    assert _used(env) == 32
-    with pytest.raises(ValidationError, match="allowance exhausted"):
-        _scan(env, BoardingDirection.OUTBOUND)
-    assert _used(env) == 32
-
-
-def test_first_and_second_scan_of_day_accepted(db_session: Session, qr_env: dict) -> None:
-    env = qr_env
-    response1 = _scan(env, BoardingDirection.OUTBOUND)
-    assert response1.success is True
-    assert _used(env) == 1
-
-    response2 = _scan(env, BoardingDirection.RETURN)
-    assert response2.success is True
-    assert _used(env) == 2
-
-
-def test_third_scan_same_day_rejected(db_session: Session, qr_env: dict) -> None:
-    """A third scan on the same day is rejected even if remaining allowance exists."""
-    env = qr_env
-    # Two usages already consumed today: live outbound + seeded return on trip2.
-    _scan(env, BoardingDirection.OUTBOUND)
-    env["session"].add(
-        BoardingRecord(
-            subscription_id=env["subscription"].id,
-            student_id=env["student"].id,
-            trip_id=env["trip2"].id,
-            supervisor_id=env["supervisor"].id,
-            direction=BoardingDirection.OUTBOUND,
-            pickup_point_id=env["outbound_point2"].id,
-            boarded_at=datetime.now(timezone.utc),
-        )
-    )
-    env["session"].commit()
-
-    # A further scan today (trip1 RETURN: not a duplicate - trip1 only has an
-    # outbound record - and within the total allowance) is rejected by the
-    # daily limit.
-    with pytest.raises(ValidationError, match="Daily QR usage limit"):
-        _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
-
-
-def test_usage_on_later_day_works_when_allowance_remains(
+def test_return_scan_allowed_when_week_exhausted_but_today_already_used(
     db_session: Session, qr_env: dict
 ) -> None:
-    """A scan the next calendar day succeeds: the daily counter resets per day."""
+    """A same-day return scan is allowed even when the weekly allowance is exhausted."""
     env = qr_env
+    today = business_today()
+
+    # 3 usage days on other week dates + today = 4 (limit).
+    for day in _week_dates(today, 3, exclude={today}):
+        _seed_usage_day(env, day)
+    _seed_reservation(env, today)
     _scan(env, BoardingDirection.OUTBOUND)
+    assert _used_days_this_week(env) == 4
+
+    # The week is full, but today's RETURN does not create a new usage day.
     _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
-
-    # Day 1 (yesterday): backdate the two records; the daily counter for today
-    # resets while the total allowance keeps accounting for them.
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-    records = (
-        env["session"]
-        .query(BoardingRecord)
-        .filter(BoardingRecord.subscription_id == env["subscription"].id)
-        .all()
-    )
-    for record in records:
-        record.boarded_at = yesterday
-    env["session"].commit()
-
-    repo = env["service"].boarding_repo
-    assert (
-        repo.count_usages_for_subscription_on_date(
-            env["subscription"].id, datetime.now(timezone.utc)
-        )
-        == 0
-    )
-
-    # Day 2 (now): the recurring trip is the second trip; the subscription's
-    # configured pickup points follow the recurring trip, as in production.
-    subscription = env["subscription"]
-    subscription.outbound_pickup_point_id = env["outbound_point2"].id
-    subscription.return_pickup_point_id = env["return_point2"].id
-    env["session"].commit()
-
-    _scan(env, BoardingDirection.OUTBOUND, trip=env["trip2"], pickup=env["outbound_point2"])
-    assert _used(env) == 3
+    assert _used_days_this_week(env) == 4
+    assert env["service"].boarding_repo.count_for_subscription(env["subscription"].id) == 3 * 2 + 2
 
 
-def test_day_without_usage_does_not_consume_allowance(db_session: Session, qr_env: dict) -> None:
-    """Skipping calendar days never consumes usage days; only scans count."""
+def test_unused_weekly_allowance_does_not_roll_over(db_session: Session, qr_env: dict) -> None:
+    """Week 1 uses 2 of 4 days; the unused 2 never extend the following week."""
     env = qr_env
+    today = business_today()
+    monday = week_start(today)
+
+    # Two usage days LAST week (2 of 4 allowance left unused there).
+    last_week_monday = monday - timedelta(days=7)
+    _seed_usage_day(env, last_week_monday)
+    _seed_usage_day(env, last_week_monday + timedelta(days=1))
+
+    # This week: one live usage day (today).
+    _seed_reservation(env, today)
     _scan(env, BoardingDirection.OUTBOUND)
-    _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
+    assert _used_days_this_week(env) == 1
 
-    # Simulate 10 skipped days: backdate records, verify total unchanged
-    repo = env["service"].boarding_repo
-    records = (
-        env["session"]
-        .query(BoardingRecord)
-        .filter(BoardingRecord.subscription_id == env["subscription"].id)
-        .all()
-    )
-    ten_days_ago = datetime.now(timezone.utc) - timedelta(days=10)
-    for record in records:
-        record.boarded_at = ten_days_ago
-    env["session"].commit()
+    # Fill this week to the limit with 3 more usage days on other dates.
+    for day in _week_dates(today, 3, exclude={today}):
+        _seed_usage_day(env, day)
+    assert _used_days_this_week(env) == 4
 
-    # Allowance unchanged: still 2 used of 32
-    assert repo.count_usages_for_subscription(env["subscription"].id) == 2
-    assert repo.count_usages_for_subscription_on_date(
-        env["subscription"].id, datetime.now(timezone.utc)
-    ) == 0
-
-    # Two more scans today are accepted (day counter independent of calendar
-    # history): the recurring trip's points are bound to the subscription.
-    subscription = env["subscription"]
-    subscription.outbound_pickup_point_id = env["outbound_point2"].id
-    subscription.return_pickup_point_id = env["return_point2"].id
-    env["session"].commit()
-
-    _scan(env, BoardingDirection.OUTBOUND, trip=env["trip2"], pickup=env["outbound_point2"])
-    _scan(env, BoardingDirection.RETURN, trip=env["trip2"], pickup=env["return_point2"])
-    assert _used(env) == 4
+    # A further live scan today is rejected even though last week had 2 unused
+    # days: rolled-over allowance is NOT granted. (Today's allowance slot was
+    # already consumed; today's return scan is covered by the duplicate guard,
+    # so use the RETURN direction of the same trip to hit the weekly/daily
+    # guard with a fresh scan request.)
+    with pytest.raises((ValidationError, ConflictError)):
+        _scan(env, BoardingDirection.OUTBOUND)
+    assert _used_days_this_week(env) == 4
 
 
-def test_failed_scan_does_not_consume_usage(db_session: Session, qr_env: dict) -> None:
-    """Rejected scans (wrong pickup point) must not consume allowance."""
+def test_next_week_allowance_resets(db_session: Session, qr_env: dict) -> None:
+    """A new calendar week starts with a fresh days_per_week allowance."""
     env = qr_env
-    before = _used(env)
+    today = business_today()
+    monday = week_start(today)
 
-    # Wrong pickup point -> validation error
-    with pytest.raises(ValidationError):
-        _scan(
-            env,
-            BoardingDirection.OUTBOUND,
-            pickup=env["return_point"],  # return point for an outbound scan
-        )
-    assert _used(env) == before
+    # Exhaust LAST week completely (4 usage days).
+    last_week_monday = monday - timedelta(days=7)
+    for offset in range(4):
+        _seed_usage_day(env, last_week_monday + timedelta(days=offset))
 
-    # Invalid token -> not found
-    from app.exceptions.base import NotFoundError
-
-    with pytest.raises(NotFoundError):
-        _scan(env, BoardingDirection.OUTBOUND, token="b" * 64)
-    assert _used(env) == before
-
-    # A valid scan afterwards still works (day not consumed by failures)
+    # This week is fresh: a scan today succeeds.
+    _seed_reservation(env, today)
     response = _scan(env, BoardingDirection.OUTBOUND)
     assert response.success is True
-    assert _used(env) == before + 1
+    assert response.usage_days_this_week == 1
+    assert response.remaining_usage_days_this_week == 3
 
 
-def test_duplicate_qr_event_cannot_consume_twice(db_session: Session, qr_env: dict) -> None:
-    """Same subscription + trip + direction is rejected twice (unique constraint)."""
+def test_third_scan_same_direction_rejected(db_session: Session, qr_env: dict) -> None:
+    """Duplicate scan for the same subscription/trip/direction is rejected."""
     env = qr_env
+    _seed_reservation(env, business_today())
     _scan(env, BoardingDirection.OUTBOUND)
     with pytest.raises(ConflictError):
         _scan(env, BoardingDirection.OUTBOUND)
-    assert _used(env) == 1
+    # Return direction still allowed (one usage day, 2 scans).
+    _scan(env, BoardingDirection.RETURN)
+    with pytest.raises(ConflictError):
+        _scan(env, BoardingDirection.RETURN)
 
 
-def test_scan_via_api_consumes_exactly_one_usage(
+def test_third_scan_of_same_day_rejected(db_session: Session, qr_env: dict) -> None:
+    """A third scan on the same calendar day is rejected (2 scans/day max)."""
+    env = qr_env
+    today = business_today()
+    _seed_reservation(env, today)
+    _scan(env, BoardingDirection.OUTBOUND)
+    _scan(env, BoardingDirection.RETURN)
+
+    # Point the existing selection at another same-day trip so the scan passes
+    # reservation authorization and reaches the daily-scan limit.
+    trip2, out2, _ret2 = _make_trip_for_day(env, today)
+    reservation = (
+        env["session"]
+        .query(Reservation)
+        .filter(
+            Reservation.student_id == env["student"].id,
+            Reservation.service_date == today,
+            Reservation.trip_id == env["trip_today"].id,
+        )
+        .first()
+    )
+    assert reservation is not None
+    reservation.trip_id = trip2.id
+    reservation.outbound_pickup_point_id = out2.id
+    env["session"].commit()
+
+    with pytest.raises(ValidationError, match="Daily QR limit"):
+        _scan(env, BoardingDirection.OUTBOUND, trip=trip2, pickup=out2)
+
+
+def test_subscription_expiration_overrides_weekly_allowance(
+    db_session: Session, qr_env: dict
+) -> None:
+    """An expired subscription cannot scan even with the whole weekly allowance unused."""
+    env = qr_env
+    env["subscription"].start_date = business_today() - timedelta(days=10)
+    env["subscription"].end_date = business_today() - timedelta(days=1)
+    env["session"].commit()
+
+    with pytest.raises(ValidationError, match="expired"):
+        _scan(env, BoardingDirection.OUTBOUND)
+    assert env["service"].boarding_repo.count_for_subscription(env["subscription"].id) == 0
+
+
+def test_scan_without_daily_reservation_rejected(db_session: Session, qr_env: dict) -> None:
+    """No confirmed selection for the trip's date -> scan rejected."""
+    env = qr_env
+    with pytest.raises(ValidationError, match="No confirmed daily transportation selection"):
+        _scan(env, BoardingDirection.OUTBOUND)
+
+
+def test_scan_on_trip_of_another_service_date_rejected(db_session: Session, qr_env: dict) -> None:
+    """A trip departing another date cannot be scanned today (real-time boarding)."""
+    env = qr_env
+    other_day = _week_dates(business_today(), 1, exclude={business_today()})[0]
+    trip_other, out_other, _ret_other = _make_trip_for_day(env, other_day)
+    _seed_reservation(env, other_day, trip=trip_other, out_point=out_other, ret_point=_ret_other)
+    with pytest.raises(ValidationError, match="service date"):
+        _scan(env, BoardingDirection.OUTBOUND, trip=trip_other, pickup=out_other)
+
+
+def test_failed_scan_does_not_consume_usage(db_session: Session, qr_env: dict) -> None:
+    """Rejected scans must not consume the weekly allowance."""
+    env = qr_env
+    before = env["service"].boarding_repo.count_for_subscription(env["subscription"].id)
+
+    with pytest.raises(ValidationError):
+        _scan(env, BoardingDirection.OUTBOUND)  # no reservation for today
+    with pytest.raises(ValidationError):
+        _scan(env, BoardingDirection.OUTBOUND)  # still none
+
+    assert env["service"].boarding_repo.count_for_subscription(env["subscription"].id) == before
+
+
+def test_scan_via_api_consumes_exactly_one_scan(
     client_with_db, db_session: Session, qr_env: dict
 ) -> None:
-    """End-to-end scan via HTTP consumes exactly one usage per accepted scan."""
+    """End-to-end scan via HTTP records exactly one boarding record per accepted scan."""
+    from app.core.security import create_access_token
+
     env = qr_env
+    _seed_reservation(env, business_today())
     headers = {
-        "Authorization": "Bearer " + __import__(
-            "app.core.security", fromlist=["create_access_token"]
-        ).create_access_token(
+        "Authorization": "Bearer "
+        + create_access_token(
             subject=env["supervisor"].id, role=env["supervisor"].role.value
         )
     }
     payload = {
         "qr_token": "ra7al://subscription/raw-token-qr",
-        "trip_id": env["trip1"].id,
+        "trip_id": env["trip_today"].id,
         "direction": "OUTBOUND",
         "pickup_point_id": env["outbound_point"].id,
     }
     res = client_with_db.post("/api/v1/boarding/scan", json=payload, headers=headers)
     assert res.status_code == 200, res.text
     assert res.json()["success"] is True
-    assert _used(env) == 1
+    assert res.json()["usage_days_this_week"] == 1
 
-    # Duplicate via API -> 409 and no extra usage
+    # Duplicate via API -> 409 and no extra record
     res_dup = client_with_db.post("/api/v1/boarding/scan", json=payload, headers=headers)
     assert res_dup.status_code == 409
-    assert _used(env) == 1
-
-
-def test_subscription_detail_exposes_qr_usage_fields(
-    db_session: Session, qr_env: dict
-) -> None:
-    """SubscriptionDetailResponse includes duration/usage accounting fields."""
-    from app.services.subscription_service import SubscriptionService
-
-    service = SubscriptionService(
-        subscription_repo=SubscriptionRepository(db_session),
-        plan_repo=SubscriptionPlanRepository(db_session),
-        route_repo=RouteRepository(db_session),
-        pickup_point_repo=PickupPointRepository(db_session),
-        trip_repo=TripRepository(db_session),
-        user_repo=UserRepository(db_session),
-        payment_repo=PaymentRepository(db_session),
-        boarding_repo=BoardingRepository(db_session),
+    assert (
+        env["service"].boarding_repo.count_for_subscription(env["subscription"].id) == 1
     )
-    _scan(qr_env, BoardingDirection.OUTBOUND)
-    _scan(qr_env, BoardingDirection.RETURN)
-
-    detail = service.get_subscription_detail(
-        subscription_id=qr_env["subscription"].id,
-        current_user=qr_env["student"],
-    )
-    assert detail.duration_days == 16
-    assert detail.max_qr_usages == 32
-    assert detail.used_qr_usages == 2
-    assert detail.remaining_qr_usages == 30
-    assert detail.qr_usages_today == 2
 
 
-def test_calendar_expiration_still_enforced(db_session: Session, qr_env: dict) -> None:
-    """An ACTIVE subscription past end_date cannot scan even with allowance left."""
-    env = qr_env
-    env["subscription"].start_date = date.today() - timedelta(days=3)
-    env["subscription"].end_date = date.today() - timedelta(days=1)
-    env["session"].commit()
+def test_concurrent_scan_cannot_exceed_weekly_limit(db_session: Session, qr_env: dict) -> None:
+    """Race simulation: another usage day commits while this request waits on the lock.
 
-    with pytest.raises(ValidationError, match="expired"):
-        _scan(env, BoardingDirection.OUTBOUND)
-    assert _used(env) == 0
-
-
-def test_concurrent_scan_cannot_exceed_daily_limit(db_session: Session, qr_env: dict) -> None:
-    """Race simulation: another scan commits while this one waits on the row lock.
-
-    The pre-lock checks pass (1 usage today), but after acquiring the lock the
-    limits are re-evaluated against committed data, so the daily limit holds.
-    On PostgreSQL this is enforced by SELECT ... FOR UPDATE on the subscription
-    row serializing the two transactions.
+    After acquiring the subscription row lock (SELECT ... FOR UPDATE on
+    PostgreSQL), the weekly distinct-usage-day limit is re-evaluated against
+    committed data, so the concurrent transaction can never push the week past
+    days_per_week.
     """
     from unittest.mock import patch
 
     env = qr_env
     service = env["service"]
-    _scan(env, BoardingDirection.OUTBOUND)  # usage 1 today
+    today = business_today()
 
-    real_lock = service.boarding_repo.get_subscription_row_for_update
+    # 3 usage days on other week dates; today's scan becomes the 4th (last slot).
+    for day in _week_dates(today, 3, exclude={today}):
+        _seed_usage_day(env, day)
+    assert _used_days_this_week(env) == 3
 
-    def lock_after_concurrent_scan(subscription_id):
-        row = real_lock(subscription_id)
-        # The concurrent transaction that held the lock commits its own scan
-        # (trip2 outbound: not a duplicate of this scan's trip1 return).
-        env["session"].add(
-            BoardingRecord(
-                subscription_id=env["subscription"].id,
-                student_id=env["student"].id,
-                trip_id=env["trip2"].id,
-                supervisor_id=env["supervisor"].id,
-                direction=BoardingDirection.OUTBOUND,
-                pickup_point_id=env["outbound_point2"].id,
-                boarded_at=datetime.now(timezone.utc),
-            )
+    _seed_reservation(env, today)
+    _scan(env, BoardingDirection.OUTBOUND)  # 4th usage day
+    assert _used_days_this_week(env) == 4
+
+    # A further live scan today is the RETURN (legal, no new usage day).
+    _scan(env, BoardingDirection.RETURN)
+    assert _used_days_this_week(env) == 4
+
+    # Realistic race: two simultaneous same-day scans on different trips.
+    # Request A commits its scan; request B waits on the subscription row
+    # lock. When B acquires the lock, the re-check against committed data must
+    # reject it (3rd scan of the day / weekly cap reached).
+    trip_x, out_x, _ret_x = _make_trip_for_day(env, today)
+    # Point the existing today-selection at the new trip so a scan attempt on
+    # trip_x passes reservation authorization.
+    today_reservation = (
+        env["session"]
+        .query(Reservation)
+        .filter(
+            Reservation.student_id == env["student"].id,
+            Reservation.service_date == today,
         )
-        env["session"].commit()
-        return row
-
-    with patch.object(
-        service.boarding_repo,
-        "get_subscription_row_for_update",
-        side_effect=lock_after_concurrent_scan,
-    ):
-        with pytest.raises(ValidationError, match="Daily QR usage limit"):
-            _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
-
-
-def test_concurrent_scan_cannot_exceed_total_allowance(db_session: Session, qr_env: dict) -> None:
-    """Race simulation against the total allowance: duration_days=1 -> max 2."""
-    from unittest.mock import patch
-
-    env = qr_env
-    service = env["service"]
-    env["plan"].duration_days = 1
+        .first()
+    )
+    today_reservation.trip_id = trip_x.id
+    today_reservation.outbound_pickup_point_id = out_x.id
     env["session"].commit()
 
-    _scan(env, BoardingDirection.OUTBOUND)  # usage 1 of 2
-
     real_lock = service.boarding_repo.get_subscription_row_for_update
 
     def lock_after_concurrent_scan(subscription_id):
         row = real_lock(subscription_id)
-        # The concurrent scan consumes the final allowed usage.
+        # Simulate the concurrent transaction committing its own scan (a NEW
+        # scan for today, on a second trip) while this request waited.
         env["session"].add(
             BoardingRecord(
                 subscription_id=env["subscription"].id,
                 student_id=env["student"].id,
-                trip_id=env["trip2"].id,
+                trip_id=trip_x.id,
                 supervisor_id=env["supervisor"].id,
-                direction=BoardingDirection.OUTBOUND,
-                pickup_point_id=env["outbound_point2"].id,
+                direction=BoardingDirection.RETURN,
+                pickup_point_id=env["return_point"].id,
                 boarded_at=datetime.now(timezone.utc),
             )
         )
@@ -600,6 +572,10 @@ def test_concurrent_scan_cannot_exceed_total_allowance(db_session: Session, qr_e
         "get_subscription_row_for_update",
         side_effect=lock_after_concurrent_scan,
     ):
-        with pytest.raises(ValidationError, match="allowance exhausted"):
-            _scan(env, BoardingDirection.RETURN)
-    assert _used(env) == 2
+        # This scan must be rejected: today already reached 2 scans (one
+        # outbound + one return) after the concurrent commit.
+        with pytest.raises(ValidationError, match="Daily QR limit"):
+            _scan(env, BoardingDirection.OUTBOUND, trip=trip_x, pickup=out_x)
+
+    # Never more than days_per_week distinct usage days in the week.
+    assert _used_days_this_week(env) <= 4

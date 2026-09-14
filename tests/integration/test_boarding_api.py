@@ -20,8 +20,10 @@ from app.models.enums import (
     TripStatus,
 )
 from app.models.pickup_point import PickupPoint
+from app.models.reservation import Reservation
 from app.models.route import Route
 from app.models.station import Station
+from app.models.enums import ReservationStatus
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
@@ -115,6 +117,7 @@ def _setup_boarding_env(db_session: Session) -> dict:
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("750.00"),
         is_active=True,
     )
@@ -122,6 +125,7 @@ def _setup_boarding_env(db_session: Session) -> dict:
         name="Daily Pass",
         plan_type=SubscriptionPlanType.DAILY,
         duration_days=1,
+        days_per_week=1,
         price=Decimal("45.00"),
         is_active=True,
     )
@@ -185,23 +189,16 @@ def _create_active_subscription(
     client: TestClient,
     student_token: str,
     ceo_token: str,
-    route_id: int,
     plan_id: int,
-    outbound_pickup_id: int,
-    return_pickup_id: int | None = None,
     start_date: str | None = None,
 ) -> tuple[int, str]:
-    """Helper to create and activate a subscription and return (sub_id, qr_payload)."""
+    """Helper to create and activate a subscription (plan purchase only) and return (sub_id, qr_payload)."""
     headers_student = {"Authorization": f"Bearer {student_token}"}
     headers_ceo = {"Authorization": f"Bearer {ceo_token}"}
 
     payload = {
-        "route_id": route_id,
         "plan_id": plan_id,
         "start_date": start_date or datetime.now(timezone.utc).date().isoformat(),
-        "outbound_pickup_point_id": outbound_pickup_id,
-        "return_pickup_mode": "DIFFERENT" if return_pickup_id else "SAME_AS_OUTBOUND",
-        "return_pickup_point_id": return_pickup_id,
         "payment_method": "VODAFONE_CASH",
         "transaction_reference": "VF-TX-ACTIVE",
     }
@@ -221,6 +218,67 @@ def _create_active_subscription(
     return sub_id, res_qr.json()["qr_payload"]
 
 
+def _create_daily_reservation(
+    db_session: Session,
+    student_id: int,
+    subscription_id: int,
+    trip_id: int,
+    outbound_pickup_id: int | None,
+    return_pickup_id: int | None = None,
+    direction_mode: str = "BOTH",
+) -> int:
+    """Seed today's daily transportation selection for real-time boarding scans.
+
+    The reservation API books TOMORROW by design; boarding scans happen on the
+    trip's service date in real time. Tests here use trips departing today, so
+    the selection is created directly at the model layer with the trip's
+    service date (reservation API behavior is covered by reservation tests).
+    """
+    reservation = Reservation(
+        trip_id=trip_id,
+        student_id=student_id,
+        subscription_id=subscription_id,
+        service_date=datetime.now(timezone.utc).date(),
+        status=ReservationStatus.CONFIRMED,
+        outbound_pickup_point_id=outbound_pickup_id,
+        return_pickup_point_id=return_pickup_id,
+        direction_mode=direction_mode,
+    )
+    db_session.add(reservation)
+    db_session.commit()
+    db_session.refresh(reservation)
+    return reservation.id
+
+
+def _create_boarding_setup(
+    client: TestClient,
+    db_session: Session,
+    student_token: str,
+    student_id: int,
+    ceo_token: str,
+    plan_id: int,
+    trip_id: int,
+    outbound_pickup_id: int,
+    return_pickup_id: int | None = None,
+    direction_mode: str = "BOTH",
+    start_date: str | None = None,
+) -> tuple[int, str]:
+    """Create an ACTIVE subscription + today's daily selection; return (sub_id, qr_payload)."""
+    sub_id, qr = _create_active_subscription(
+        client, student_token, ceo_token, plan_id, start_date=start_date
+    )
+    _create_daily_reservation(
+        db_session,
+        student_id=student_id,
+        subscription_id=sub_id,
+        trip_id=trip_id,
+        outbound_pickup_id=outbound_pickup_id,
+        return_pickup_id=return_pickup_id,
+        direction_mode=direction_mode,
+    )
+    return sub_id, qr
+
+
 # =========================================================================
 # PART 3: QR SECURITY TESTS
 # =========================================================================
@@ -234,17 +292,13 @@ def test_unique_qr_tokens_per_student_and_subscription(
         client_with_db,
         env["stu_a_token"],
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
-        env["p_out_a"].id,
     )
     sub_b_id, qr_b = _create_active_subscription(
         client_with_db,
         env["stu_b_token"],
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
-        env["p_out_a"].id,
     )
 
     assert sub_a_id != sub_b_id
@@ -262,13 +316,15 @@ def test_qr_cannot_be_used_by_another_student(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    # Student A subscribes
-    sub_a_id, qr_a = _create_active_subscription(
+    # Student A subscribes + selects today's trip
+    sub_a_id, qr_a = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -298,12 +354,14 @@ def test_outbound_boarding_success(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -323,6 +381,8 @@ def test_outbound_boarding_success(
     assert data["direction"] == "OUTBOUND"
     assert data["student"]["id"] == env["student_a"].id
     assert data["subscription_id"] == sub_id
+    assert data["usage_days_this_week"] == 1
+    assert data["remaining_usage_days_this_week"] == 3
 
 
 def test_return_boarding_success_and_independence_from_outbound(
@@ -332,12 +392,14 @@ def test_return_boarding_success_and_independence_from_outbound(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
         return_pickup_id=env["p_ret_a"].id,
     )
@@ -378,12 +440,14 @@ def test_expired_subscription_scan_rejected_and_auto_expired(
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
     # 1. Create active subscription
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -420,16 +484,22 @@ def test_unpaid_or_unverified_subscription_scan_rejected(
 
     # Create subscription but do NOT verify payment
     payload = {
-        "route_id": env["route_a"].id,
         "plan_id": env["plan_monthly"].id,
         "start_date": datetime.now(timezone.utc).date().isoformat(),
-        "outbound_pickup_point_id": env["p_out_a"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "CASH",
     }
     res_create = client_with_db.post("/api/v1/subscriptions", json=payload, headers=student_headers)
     assert res_create.status_code == 201
     sub_id = res_create.json()["id"]
+
+    # Give the student a daily selection so the scan reaches the status check
+    _create_daily_reservation(
+        db_session,
+        student_id=env["student_a"].id,
+        subscription_id=sub_id,
+        trip_id=env["trip_a"].id,
+        outbound_pickup_id=env["p_out_a"].id,
+    )
 
     # Direct query DB for raw QR token to test scan attempt
     sub_db = db_session.get(Subscription, sub_id)
@@ -451,24 +521,26 @@ def test_unpaid_or_unverified_subscription_scan_rejected(
     assert "not active" in res_scan.json()["detail"].lower()
 
 
-def test_qr_outside_subscription_route_rejected(
+def test_qr_outside_daily_selection_rejected(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Verify using a valid QR on a trip belonging to another route is rejected."""
+    """Using a valid QR on a trip the student did not select today is rejected."""
     env = _setup_boarding_env(db_session)
     sup_b_headers = {"Authorization": f"Bearer {env['sup_b_token']}"}
 
-    # Subscribed to Route A
-    sub_id, qr_a = _create_active_subscription(
+    # Student selected Trip A today
+    sub_id, qr_a = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
-    # Attempt to use Route A QR on Trip B (which is on Route B)
+    # Attempt to use the QR on Trip B (no daily selection for Trip B)
     res_scan = client_with_db.post(
         "/api/v1/boarding/scan",
         json={
@@ -480,7 +552,7 @@ def test_qr_outside_subscription_route_rejected(
         headers=sup_b_headers,
     )
     assert res_scan.status_code == 422
-    assert "Route" in res_scan.json()["detail"]
+    assert "selection" in res_scan.json()["detail"].lower() or "trip" in res_scan.json()["detail"].lower()
 
 
 def test_qr_with_unmatched_pickup_point_rejected(
@@ -490,12 +562,14 @@ def test_qr_with_unmatched_pickup_point_rejected(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
         return_pickup_id=env["p_ret_a"].id,
     )
@@ -521,12 +595,14 @@ def test_qr_on_cancelled_or_completed_trip_rejected(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -553,12 +629,14 @@ def test_duplicate_boarding_prevention_same_trip_same_direction(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -587,12 +665,14 @@ def test_supervisor_only_scanning_rbac_enforcement(
     student_headers = {"Authorization": f"Bearer {env['stu_a_token']}"}
     ceo_headers = {"Authorization": f"Bearer {env['ceo_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
     scan_payload = {
@@ -618,12 +698,14 @@ def test_ceo_must_not_scan_boarding(
     env = _setup_boarding_env(db_session)
     ceo_headers = {"Authorization": f"Bearer {env['ceo_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -647,13 +729,15 @@ def test_supervisor_assignment_enforcement_unassigned_supervisor_rejected(
     env = _setup_boarding_env(db_session)
     sup_a_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    # Create active subscription on Route B (Trip B is assigned to Supervisor B)
-    sub_id, qr = _create_active_subscription(
+    # Create active subscription + daily selection on Trip B (assigned to Supervisor B)
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_b_token"],
+        env["student_b"].id,
         env["ceo_token"],
-        env["route_b"].id,
         env["plan_monthly"].id,
+        env["trip_b"].id,
         env["p_out_b"].id,
     )
 
@@ -684,21 +768,25 @@ def test_supervisor_assigned_trip_students_scoping_and_isolation(
     sup_a_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
     sup_b_headers = {"Authorization": f"Bearer {env['sup_b_token']}"}
 
-    # Student A on Route A, Student B on Route B
-    _create_active_subscription(
+    # Student A and Student B each hold a subscription + today's selection
+    _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
-    _create_active_subscription(
+    _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_b_token"],
+        env["student_b"].id,
         env["ceo_token"],
-        env["route_b"].id,
         env["plan_monthly"].id,
+        env["trip_b"].id,
         env["p_out_b"].id,
     )
 
@@ -733,12 +821,14 @@ def test_supervisor_assigned_trip_boarding_records_scoping_and_isolation(
     sup_a_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
     sup_b_headers = {"Authorization": f"Bearer {env['sup_b_token']}"}
 
-    sub_a_id, qr_a = _create_active_subscription(
+    sub_a_id, qr_a = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
     # Supervisor A scans student on Trip A
@@ -770,12 +860,14 @@ def test_supervisor_trip_students_required_summary_fields(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
         return_pickup_id=env["p_ret_a"].id,
     )
@@ -786,20 +878,16 @@ def test_supervisor_trip_students_required_summary_fields(
     assert len(data) == 1
     item = data[0]
 
-    # Required fields assertions
+    # Required fields assertions (daily-selection contract)
     assert item["student_id"] == env["student_a"].id
     assert item["student_name"] == env["student_a"].full_name
     assert item["subscription_id"] == sub_id
-    assert item["subscription_type"] == "MONTHLY"
     assert item["subscription_status"] == "ACTIVE"
-    assert "start_date" in item
-    assert "end_date" in item
+    assert "service_date" in item
+    assert item["direction_mode"] == "BOTH"
     assert item["outbound_pickup"] == env["p_out_a"].name
     assert item["return_pickup"] == env["p_ret_a"].name
     assert item["payment_status"] == "VERIFIED"
-    assert item["boarding_count"] == 0
-    assert item["outbound_boarding_count"] == 0
-    assert item["return_boarding_count"] == 0
     assert item["outbound_boarded"] is False
     assert item["return_boarded"] is False
 
@@ -811,19 +899,20 @@ def test_boarding_count_accuracy_across_rides(
     env = _setup_boarding_env(db_session)
     sup_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
         return_pickup_id=env["p_ret_a"].id,
     )
 
     # 1. 0 rides
     res0 = client_with_db.get(f"/api/v1/boarding/trips/{env['trip_a'].id}/students", headers=sup_headers)
-    assert res0.json()[0]["boarding_count"] == 0
     assert res0.json()[0]["outbound_boarded"] is False
     assert res0.json()[0]["return_boarded"] is False
 
@@ -839,9 +928,6 @@ def test_boarding_count_accuracy_across_rides(
         headers=sup_headers,
     )
     res1 = client_with_db.get(f"/api/v1/boarding/trips/{env['trip_a'].id}/students", headers=sup_headers)
-    assert res1.json()[0]["boarding_count"] == 1
-    assert res1.json()[0]["outbound_boarding_count"] == 1
-    assert res1.json()[0]["return_boarding_count"] == 0
     assert res1.json()[0]["outbound_boarded"] is True
     assert res1.json()[0]["return_boarded"] is False
 
@@ -857,11 +943,10 @@ def test_boarding_count_accuracy_across_rides(
         headers=sup_headers,
     )
     res2 = client_with_db.get(f"/api/v1/boarding/trips/{env['trip_a'].id}/students", headers=sup_headers)
-    assert res2.json()[0]["boarding_count"] == 2
-    assert res2.json()[0]["outbound_boarding_count"] == 1
-    assert res2.json()[0]["return_boarding_count"] == 1
     assert res2.json()[0]["outbound_boarded"] is True
     assert res2.json()[0]["return_boarded"] is True
+    # Outbound + return on the same day count as ONE usage day
+    assert res2.json()[0]["service_date"] == datetime.now(timezone.utc).date().isoformat()
 
 
 # =========================================================================
@@ -876,12 +961,14 @@ def test_ceo_global_visibility_across_trips_and_boarding_records(
     ceo_headers = {"Authorization": f"Bearer {env['ceo_token']}"}
     sup_a_headers = {"Authorization": f"Bearer {env['sup_a_token']}"}
 
-    sub_a_id, qr_a = _create_active_subscription(
+    sub_a_id, qr_a = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
     # Scan on Trip A
@@ -920,12 +1007,14 @@ def test_ceo_visibility_does_not_permit_boarding_scan(
     env = _setup_boarding_env(db_session)
     ceo_headers = {"Authorization": f"Bearer {env['ceo_token']}"}
 
-    sub_id, qr = _create_active_subscription(
+    sub_id, qr = _create_boarding_setup(
         client_with_db,
+        db_session,
         env["stu_a_token"],
+        env["student_a"].id,
         env["ceo_token"],
-        env["route_a"].id,
         env["plan_monthly"].id,
+        env["trip_a"].id,
         env["p_out_a"].id,
     )
 
@@ -956,11 +1045,9 @@ def test_comprehensive_rbac_matrix(
     ceo_headers = {"Authorization": f"Bearer {env['ceo_token']}"}
 
     sub_payload = {
-        "route_id": env["route_a"].id,
         "plan_id": env["plan_monthly"].id,
         "start_date": datetime.now(timezone.utc).date().isoformat(),
-        "outbound_pickup_point_id": env["p_out_a"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
 
     # 1. Create subscription: STUDENT (201), SUPERVISOR (403), CEO (403)

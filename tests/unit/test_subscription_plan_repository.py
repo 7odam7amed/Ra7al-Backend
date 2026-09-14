@@ -14,6 +14,7 @@ def test_subscription_plan_repository_crud(db_session: Session) -> None:
         name="Daily Transit Plan",
         plan_type=SubscriptionPlanType.DAILY,
         duration_days=1,
+        days_per_week=1,
         price=Decimal("45.00"),
         currency="EGP",
         is_active=True,
@@ -22,6 +23,7 @@ def test_subscription_plan_repository_crud(db_session: Session) -> None:
     assert plan_daily.name == "Daily Transit Plan"
     assert plan_daily.plan_type == SubscriptionPlanType.DAILY
     assert plan_daily.duration_days == 1
+    assert plan_daily.days_per_week == 1
     assert plan_daily.price == Decimal("45.00")
     assert plan_daily.is_active is True
 
@@ -30,6 +32,7 @@ def test_subscription_plan_repository_crud(db_session: Session) -> None:
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("800.00"),
         currency="EGP",
         is_active=True,
@@ -40,6 +43,7 @@ def test_subscription_plan_repository_crud(db_session: Session) -> None:
         name="Semester Term Pass",
         plan_type=SubscriptionPlanType.TERM,
         duration_days=90,
+        days_per_week=5,
         price=Decimal("2200.00"),
         currency="EGP",
         is_active=False,
@@ -82,3 +86,7 @@ def test_subscription_plan_repository_crud(db_session: Session) -> None:
     assert updated.name == "Updated Daily Plan"
     assert updated.price == Decimal("50.00")
     assert updated.is_active is False
+
+    # 9. Update days_per_week
+    re_weekly = repo.update(plan=plan_monthly, days_per_week=5)
+    assert re_weekly.days_per_week == 5

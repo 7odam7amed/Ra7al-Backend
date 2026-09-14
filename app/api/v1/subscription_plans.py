@@ -32,7 +32,7 @@ def create_subscription_plan(
         get_subscription_plan_service
     ),
 ) -> SubscriptionPlanResponse:
-    """Create a new student subscription plan (DAILY, WEEKLY, MONTHLY, TERM) with a CEO-defined duration."""
+    """Create a new student subscription plan (DAILY, WEEKLY, MONTHLY, TERM) with a CEO-defined duration and weekly usage-day allowance."""
     plan = plan_service.create_plan(current_user=current_user, data=data)
     return SubscriptionPlanResponse.model_validate(plan)
 
@@ -88,7 +88,7 @@ def get_subscription_plan_by_id(
 @subscription_plans_router.patch(
     "/{plan_id}",
     response_model=SubscriptionPlanResponse,
-    summary="Update subscription plan name, price, or status (CEO only)",
+    summary="Update subscription plan name, price, duration, weekly allowance, or status (CEO only)",
     dependencies=[Depends(CEO_ONLY)],
 )
 def update_subscription_plan(

@@ -90,7 +90,7 @@ def _create_setup(db: Session):
     db.commit()
 
 
-    plan = SubscriptionPlan(name="Monthly Plan", plan_type=SubscriptionPlanType.MONTHLY, duration_days=30, price=Decimal("600.00"), currency="EGP", is_active=True)
+    plan = SubscriptionPlan(name="Monthly Plan", plan_type=SubscriptionPlanType.MONTHLY, duration_days=30, days_per_week=4, price=Decimal("600.00"), currency="EGP", is_active=True)
     db.add(plan)
     db.commit()
 
@@ -108,13 +108,41 @@ def _create_setup(db: Session):
     }
 
 
+def _make_subscription(session: Session, data: dict, student_id: int) -> Subscription:
+    """Create a minimal ACTIVE subscription for reservation seeding."""
+    raw_token = secrets.token_urlsafe(16)
+    sub = Subscription(
+        student_id=student_id,
+        plan_id=data["plan"].id,
+        price_snapshot=Decimal("600.00"),
+        duration_days_snapshot=30,
+        days_per_week_snapshot=4,
+        currency="EGP",
+        start_date=date.today(),
+        end_date=date.today() + timedelta(days=29),
+        qr_token=raw_token,
+        qr_token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        status=SubscriptionStatus.ACTIVE,
+    )
+    session.add(sub)
+    session.commit()
+    session.refresh(sub)
+    return sub
+
+
 def test_student_cannot_access_another_students_reservation(client_with_db: TestClient, db_session: Session) -> None:
     data = _create_setup(db_session)
     student_a, token_a = _create_user(db_session, "student_a@test.edu", RoleEnum.STUDENT, "Student A")
     student_b, token_b = _create_user(db_session, "student_b@test.edu", RoleEnum.STUDENT, "Student B")
 
     # Student A creates a reservation
-    res_a = Reservation(trip_id=data["trip1"].id, student_id=student_a.id, status=ReservationStatus.CONFIRMED)
+    res_a = Reservation(
+        trip_id=data["trip1"].id,
+        student_id=student_a.id,
+        subscription_id=_make_subscription(db_session, data, student_a.id).id,
+        service_date=data["trip1"].departure_time.date(),
+        status=ReservationStatus.CONFIRMED,
+    )
     db_session.add(res_a)
     db_session.commit()
 
@@ -135,7 +163,13 @@ def test_student_cannot_access_another_students_payment(client_with_db: TestClie
     student_a, token_a = _create_user(db_session, "student_pay_a@test.edu", RoleEnum.STUDENT, "Student A")
     student_b, token_b = _create_user(db_session, "student_pay_b@test.edu", RoleEnum.STUDENT, "Student B")
 
-    res_a = Reservation(trip_id=data["trip1"].id, student_id=student_a.id, status=ReservationStatus.CONFIRMED)
+    res_a = Reservation(
+        trip_id=data["trip1"].id,
+        student_id=student_a.id,
+        subscription_id=_make_subscription(db_session, data, student_a.id).id,
+        service_date=data["trip1"].departure_time.date(),
+        status=ReservationStatus.CONFIRMED,
+    )
     db_session.add(res_a)
     db_session.commit()
 
@@ -179,14 +213,13 @@ def test_student_cannot_access_another_students_subscription_or_qr(client_with_d
 
     sub_a = Subscription(
         student_id=student_a.id,
-        route_id=data["route"].id,
         plan_id=data["plan"].id,
         price_snapshot=Decimal("600.00"),
+        duration_days_snapshot=data["plan"].duration_days,
+        days_per_week_snapshot=data["plan"].days_per_week,
         currency="EGP",
         start_date=date.today(),
-        end_date=date.today() + timedelta(days=30),
-        outbound_pickup_point_id=data["pp1"].id,
-        return_pickup_point_id=data["pp1"].id,
+        end_date=date.today() + timedelta(days=29),
         qr_token=raw_token,
         qr_token_hash=qr_hash,
         status=SubscriptionStatus.ACTIVE,

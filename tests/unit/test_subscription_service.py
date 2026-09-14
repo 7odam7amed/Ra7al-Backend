@@ -15,7 +15,6 @@ from app.models.enums import (
     GenderEnum,
     PaymentMethod,
     PaymentStatus,
-    ReturnPickupMode,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
@@ -39,14 +38,13 @@ from app.repositories.trip_repository import TripRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.subscription import SubscriptionCreateRequest
 from app.services.subscription_service import SubscriptionService
+from app.utils.dates import business_today
 
 
 @pytest.fixture
 def sub_service(db_session) -> tuple[SubscriptionService, dict]:
     user_repo = UserRepository(db_session)
-    route_repo = RouteRepository(db_session)
     plan_repo = SubscriptionPlanRepository(db_session)
-    pickup_repo = PickupPointRepository(db_session)
     trip_repo = TripRepository(db_session)
     payment_repo = PaymentRepository(db_session)
     bus_repo = BusRepository(db_session)
@@ -56,8 +54,6 @@ def sub_service(db_session) -> tuple[SubscriptionService, dict]:
     service = SubscriptionService(
         subscription_repo=sub_repo,
         plan_repo=plan_repo,
-        route_repo=route_repo,
-        pickup_point_repo=pickup_repo,
         trip_repo=trip_repo,
         user_repo=user_repo,
         payment_repo=payment_repo,
@@ -94,100 +90,37 @@ def sub_service(db_session) -> tuple[SubscriptionService, dict]:
         gender=GenderEnum.FEMALE,
     )
 
-    bus = bus_repo.create(
-        bus_number="BUS-SS-01",
-        license_plate="PLT-SS-01",
-        capacity=40,
-        status=BusStatus.ACTIVE,
-    )
-
-    station_1 = Station(
-        name="Main Campus", code="MC-01", latitude=30.0, longitude=31.0, is_active=True
-    )
-    station_2 = Station(
-        name="Downtown", code="DT-01", latitude=30.1, longitude=31.1, is_active=True
-    )
-    db_session.add_all([station_1, station_2])
-    db_session.flush()
-
-    route_1 = route_repo.create(
-        name="Campus to Downtown",
-        route_number="R-1",
-        origin_station_id=station_1.id,
-        destination_station_id=station_2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=30,
-    )
-    route_2 = route_repo.create(
-        name="Campus to Uptown",
-        route_number="R-2",
-        origin_station_id=station_1.id,
-        destination_station_id=station_2.id,
-        distance_km=12.0,
-        estimated_duration_minutes=35,
-    )
-
     plan_daily = plan_repo.create(
         name="Daily Pass",
         plan_type=SubscriptionPlanType.DAILY,
         duration_days=1,
+        days_per_week=1,
         price=Decimal("40.00"),
     )
     plan_monthly = plan_repo.create(
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("750.00"),
     )
     plan_term = plan_repo.create(
         name="Term Pass",
         plan_type=SubscriptionPlanType.TERM,
         duration_days=90,
+        days_per_week=5,
         price=Decimal("2000.00"),
-    )
-
-    now_utc = datetime.now(timezone.utc)
-    trip_1 = trip_repo.create(
-        route_id=route_1.id,
-        bus_id=bus.id,
-        supervisor_id=supervisor.id,
-        departure_time=now_utc,
-        estimated_arrival_time=now_utc + timedelta(hours=1),
-        passenger_capacity=30,
-    )
-    trip_2 = trip_repo.create(
-        route_id=route_2.id,
-        bus_id=bus.id,
-        supervisor_id=supervisor.id,
-        departure_time=now_utc,
-        estimated_arrival_time=now_utc + timedelta(hours=1),
-        passenger_capacity=30,
-    )
-
-    pickup_r1_a = pickup_repo.create(
-        trip_id=trip_1.id, name="R1 Stop A", sequence=1
-    )
-    pickup_r1_b = pickup_repo.create(
-        trip_id=trip_1.id, name="R1 Stop B", sequence=2
-    )
-    pickup_r2 = pickup_repo.create(
-        trip_id=trip_2.id, name="R2 Stop A", sequence=1
     )
 
     entities = {
         "ceo": ceo,
+        "supervisor": supervisor,
         "student": student,
         "other_student": other_student,
-        "route_1": route_1,
-        "route_2": route_2,
         "plan_daily": plan_daily,
         "plan_monthly": plan_monthly,
         "plan_term": plan_term,
-        "inactive_plan": plan_monthly,
         "plan_repo": plan_repo,
-        "pickup_r1_a": pickup_r1_a,
-        "pickup_r1_b": pickup_r1_b,
-        "pickup_r2": pickup_r2,
         "sub_repo": sub_repo,
     }
     return service, entities
@@ -196,21 +129,15 @@ def sub_service(db_session) -> tuple[SubscriptionService, dict]:
 def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     service, e = sub_service
 
-    today = datetime.now(timezone.utc).date()
-    start_d = today
-    # Expected end date for monthly: plan covers start + 29 days (duration_days = 30)
+    start_d = business_today()
     expected_monthly_end = start_d + timedelta(days=29)
-
-    # Expected end date for term: plan covers start + 89 days (duration_days = 90)
     expected_term_end = start_d + timedelta(days=89)
 
-    # 1. Successful monthly subscription with same return pickup point
+    # 1. Successful monthly subscription: plan + start date + digital payment.
+    #    NO route, NO trip, NO pickup point fields exist on the request.
     req = SubscriptionCreateRequest(
-        route_id=e["route_1"].id,
         plan_id=e["plan_monthly"].id,
         start_date=start_d,
-        outbound_pickup_point_id=e["pickup_r1_a"].id,
-        return_pickup_mode=ReturnPickupMode.SAME_AS_OUTBOUND,
         payment_method=PaymentMethod.VODAFONE_CASH,
         transaction_reference="VF-998877",
     )
@@ -221,8 +148,11 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     assert sub.start_date == start_d
     assert sub.end_date == expected_monthly_end
     assert sub.price_snapshot == Decimal("750.00")
-    assert sub.outbound_pickup_point_id == e["pickup_r1_a"].id
-    assert sub.return_pickup_point_id == e["pickup_r1_a"].id
+    assert sub.duration_days_snapshot == 30
+    assert sub.days_per_week_snapshot == 4
+    assert sub.route_id is None
+    assert sub.outbound_pickup_point_id is None
+    assert sub.return_pickup_point_id is None
     assert sub.payment is not None
     assert sub.payment.amount == Decimal("750.00")
     assert sub.payment.status == PaymentStatus.SUBMITTED
@@ -233,52 +163,55 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     assert "ACTIVE" in str(exc.value)
 
     # 3. Inactive plan rejected
-    inactive_plan = e["plan_repo"].update(e["inactive_plan"], is_active=False)
+    inactive_plan = e["plan_repo"].update(e["plan_monthly"], is_active=False)
     with pytest.raises(ValidationError):
         service.create_subscription(
             student_id=e["student"].id,
             data=SubscriptionCreateRequest(
-                route_id=e["route_1"].id,
-                plan_id=e["inactive_plan"].id,
-                outbound_pickup_point_id=e["pickup_r1_a"].id,
+                plan_id=inactive_plan.id,
+                start_date=start_d,
+                payment_method=PaymentMethod.CASH,
             ),
         )
+    e["plan_repo"].update(inactive_plan, is_active=True)
 
-    # 4. Pickup point belonging to another route rejected
+    # 4. Digital payment method without reference rejected
     with pytest.raises(ValidationError):
         service.create_subscription(
             student_id=e["student"].id,
             data=SubscriptionCreateRequest(
-                route_id=e["route_1"].id,
                 plan_id=e["plan_monthly"].id,
-                outbound_pickup_point_id=e["pickup_r2"].id,  # belongs to route 2
+                start_date=start_d + timedelta(days=100),
+                payment_method=PaymentMethod.INSTAPAY,
+                transaction_reference=None,
             ),
         )
 
-    # 5. Different return pickup mode without return pickup ID rejected
-    with pytest.raises(PydanticValidationError):
-        SubscriptionCreateRequest(
-            route_id=1,
-            plan_id=1,
-            outbound_pickup_point_id=1,
-            return_pickup_mode=ReturnPickupMode.DIFFERENT,
-        )
-
-    # 6. Different return pickup mode from same route succeeds
-    sub_diff = service.create_subscription(
-        student_id=e["other_student"].id,
+    # 5. Cash payment without reference succeeds
+    cash_sub = service.create_subscription(
+        student_id=e["student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_1"].id,
-            plan_id=e["plan_term"].id,
-            start_date=start_d,
-            outbound_pickup_point_id=e["pickup_r1_a"].id,
-            return_pickup_mode=ReturnPickupMode.DIFFERENT,
-            return_pickup_point_id=e["pickup_r1_b"].id,
+            plan_id=e["plan_daily"].id,
+            start_date=start_d + timedelta(days=100),
+            payment_method=PaymentMethod.CASH,
         ),
     )
-    assert sub_diff.return_pickup_point_id == e["pickup_r1_b"].id
-    assert sub_diff.end_date == expected_term_end
-    assert sub_diff.price_snapshot == Decimal("2000.00")
+    assert cash_sub.payment.status == PaymentStatus.PENDING
+    assert cash_sub.end_date == start_d + timedelta(days=100)
+
+    # 6. Term subscription with digital reference
+    sub_term = service.create_subscription(
+        student_id=e["other_student"].id,
+        data=SubscriptionCreateRequest(
+            plan_id=e["plan_term"].id,
+            start_date=start_d,
+            payment_method=PaymentMethod.VODAFONE_CASH,
+            transaction_reference="VF-TERM-1",
+        ),
+    )
+    assert sub_term.end_date == expected_term_end
+    assert sub_term.price_snapshot == Decimal("2000.00")
+    assert sub_term.days_per_week_snapshot == 5
 
     # 7. Activate subscription and verify QR access
     e["sub_repo"].update_status(sub, SubscriptionStatus.ACTIVE)
@@ -296,28 +229,36 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
         service.create_subscription(
             student_id=e["student"].id,
             data=SubscriptionCreateRequest(
-                route_id=e["route_1"].id,
                 plan_id=e["plan_daily"].id,
                 start_date=start_d + timedelta(days=10),
-                outbound_pickup_point_id=e["pickup_r1_a"].id,
+                payment_method=PaymentMethod.CASH,
             ),
         )
 
-    # 10. Daily subscription dates
-    daily_start = today + timedelta(days=15)
-    daily_req = SubscriptionCreateRequest(
-        route_id=e["route_2"].id,
-        plan_id=e["plan_daily"].id,
-        start_date=daily_start,
-        outbound_pickup_point_id=e["pickup_r2"].id,
-    )
-    daily_sub = service.create_subscription(student_id=e["student"].id, data=daily_req)
-    assert daily_sub.start_date == daily_start
-    assert daily_sub.end_date == daily_start  # single transportation day
+    # 10. Past start date rejected
+    with pytest.raises(ValidationError):
+        service.create_subscription(
+            student_id=e["student"].id,
+            data=SubscriptionCreateRequest(
+                plan_id=e["plan_daily"].id,
+                start_date=business_today() - timedelta(days=1),
+                payment_method=PaymentMethod.CASH,
+            ),
+        )
+
+    # 11. Non-existent plan rejected
+    with pytest.raises(NotFoundError):
+        service.create_subscription(
+            student_id=e["student"].id,
+            data=SubscriptionCreateRequest(
+                plan_id=999999,
+                payment_method=PaymentMethod.CASH,
+            ),
+        )
 
 
-def test_subscription_service_daily_monthly_term_date_calculations(sub_service) -> None:
-    """Explicitly verify duration-based date math across month and year boundaries."""
+def test_subscription_service_date_calculations(sub_service) -> None:
+    """Verify inclusive duration-based date math across month/year boundaries."""
     service, e = sub_service
 
     base_year = datetime.now(timezone.utc).year + 1
@@ -325,42 +266,38 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
     while calendar.isleap(non_leap):
         non_leap += 1
 
-    # Daily
+    # Daily (duration_days = 1): single transportation day.
     d_sub = service.create_subscription(
         student_id=e["student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_1"].id,
             plan_id=e["plan_daily"].id,
             start_date=date(non_leap, 2, 10),
-            outbound_pickup_point_id=e["pickup_r1_a"].id,
+            payment_method=PaymentMethod.CASH,
         ),
     )
     assert d_sub.start_date == date(non_leap, 2, 10)
     assert d_sub.end_date == date(non_leap, 2, 10)
 
-    # Monthly (duration_days = 30): Jan 31 start -> Mar 2 in a non-leap year
+    # Monthly (duration_days = 30): Jan 31 start -> Mar 1 in a non-leap year.
     m_sub = service.create_subscription(
         student_id=e["other_student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_2"].id,
             plan_id=e["plan_monthly"].id,
             start_date=date(non_leap, 1, 31),
-            outbound_pickup_point_id=e["pickup_r2"].id,
+            payment_method=PaymentMethod.CASH,
         ),
     )
     assert m_sub.start_date == date(non_leap, 1, 31)
     assert m_sub.end_date == date(non_leap, 1, 31) + timedelta(days=29)
 
-    # Term (duration_days = 90): Nov 30 start -> covers 90 days into the next year
-    # Cancel previous other_student sub first
+    # Term (duration_days = 90): Nov 30 start covers 90 days into the next year.
     service.cancel_subscription(m_sub.id, current_user=e["other_student"])
     t_sub = service.create_subscription(
         student_id=e["other_student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_2"].id,
             plan_id=e["plan_term"].id,
             start_date=date(non_leap, 11, 30),
-            outbound_pickup_point_id=e["pickup_r2"].id,
+            payment_method=PaymentMethod.CASH,
         ),
     )
     assert t_sub.start_date == date(non_leap, 11, 30)
@@ -368,18 +305,44 @@ def test_subscription_service_daily_monthly_term_date_calculations(sub_service) 
     assert t_sub.end_date == expected_term_end
 
 
-def test_subscription_service_supervisor_and_student_rbac_details(sub_service) -> None:
-    """Verify RBAC on get_subscription_detail for student owner, assigned supervisor, and CEO."""
+def test_subscription_snapshots_survive_plan_edits(sub_service) -> None:
+    """Editing a plan after purchase must not mutate an active subscription."""
     service, e = sub_service
+    start_d = business_today()
 
-    today = datetime.now(timezone.utc).date()
     sub = service.create_subscription(
         student_id=e["student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_1"].id,
+            plan_id=e["plan_monthly"].id,
+            start_date=start_d,
+            payment_method=PaymentMethod.CASH,
+        ),
+    )
+    assert sub.duration_days_snapshot == 30
+    assert sub.days_per_week_snapshot == 4
+
+    # CEO edits the plan afterwards.
+    e["plan_repo"].update(
+        e["plan_monthly"], duration_days=45, days_per_week=6
+    )
+
+    # The existing subscription keeps its snapshots.
+    fetched = e["sub_repo"].get_by_id(sub.id)
+    assert fetched.duration_days_snapshot == 30
+    assert fetched.days_per_week_snapshot == 4
+    assert fetched.end_date == start_d + timedelta(days=29)
+
+
+def test_subscription_service_rbac_details(sub_service) -> None:
+    """Verify RBAC on get_subscription_detail for student owner, supervisor, and CEO."""
+    service, e = sub_service
+
+    sub = service.create_subscription(
+        student_id=e["student"].id,
+        data=SubscriptionCreateRequest(
             plan_id=e["plan_daily"].id,
-            start_date=today + timedelta(days=20),
-            outbound_pickup_point_id=e["pickup_r1_a"].id,
+            start_date=business_today() + timedelta(days=20),
+            payment_method=PaymentMethod.CASH,
         ),
     )
 
@@ -400,14 +363,12 @@ def test_subscription_service_cancel_lifecycle(sub_service) -> None:
     """Verify subscription cancellation behavior for student owner vs non-owner."""
     service, e = sub_service
 
-    today = datetime.now(timezone.utc).date()
     sub = service.create_subscription(
         student_id=e["student"].id,
         data=SubscriptionCreateRequest(
-            route_id=e["route_1"].id,
             plan_id=e["plan_daily"].id,
-            start_date=today + timedelta(days=25),
-            outbound_pickup_point_id=e["pickup_r1_a"].id,
+            start_date=business_today() + timedelta(days=25),
+            payment_method=PaymentMethod.CASH,
         ),
     )
 
@@ -422,3 +383,28 @@ def test_subscription_service_cancel_lifecycle(sub_service) -> None:
     # Cannot cancel already cancelled subscription
     with pytest.raises(ValidationError):
         service.cancel_subscription(sub.id, current_user=e["student"])
+
+
+def test_subscription_detail_exposes_weekly_usage_fields(sub_service) -> None:
+    """Detail response exposes days (not scans) for weekly accounting."""
+    service, e = sub_service
+    start_d = business_today()
+
+    sub = service.create_subscription(
+        student_id=e["student"].id,
+        data=SubscriptionCreateRequest(
+            plan_id=e["plan_monthly"].id,
+            start_date=start_d,
+            payment_method=PaymentMethod.CASH,
+        ),
+    )
+    e["sub_repo"].update_status(sub, SubscriptionStatus.ACTIVE)
+
+    detail = service.get_subscription_detail(sub.id, current_user=e["student"])
+    assert detail.duration_days == 30
+    assert detail.days_per_week == 4
+    assert detail.usage_days_this_week == 0
+    assert detail.remaining_usage_days_this_week == 4
+    assert detail.used_qr_usages == 0
+    assert detail.qr_usages_today == 0
+    assert detail.payment_status == PaymentStatus.PENDING

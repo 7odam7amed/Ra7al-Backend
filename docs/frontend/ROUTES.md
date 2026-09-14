@@ -74,7 +74,7 @@ Routes have a boolean `is_active` (no enum). Inactive routes cannot be selected 
 | `PATCH /routes/{route_id}/supervisor` | ✓ | ✓ | ✗ |
 | `DELETE /routes/{route_id}` | ✓ | ✓ | ✗ |
 
-**Student read access is intentional:** the subscription purchase flow ("اشترك الآن") requires students to load routes to pick one. All management operations remain blocked for students.
+**Student read access is intentional:** students need routes to browse the network and read trip context. Route/trip/pickup-point choice is NOT part of subscription purchase — the subscription is plan + dates + payment only; transportation is chosen per day through the reservation workflow. All route management operations remain blocked for students.
 
 ### Validation rules
 
@@ -125,7 +125,7 @@ Two distinct concepts — don't conflate them:
 | Attached to | Route | Trip |
 | Purpose | Geographic path of the route | Student gathering locations for boarding scans |
 | Ordered by | `stop_order` | `sequence` |
-| Used by | Route display, planning | Subscription pickup selection, QR boarding validation |
+| Used by | Route display, planning | Daily reservation pickup selection, QR boarding validation |
 
 ## 5. Frontend Flow Suggestion (CEO route builder)
 

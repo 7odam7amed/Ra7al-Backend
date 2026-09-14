@@ -105,6 +105,7 @@ def _setup_transit_fixtures(
         name="Daily Transit Pass",
         plan_type=SubscriptionPlanType.DAILY,
         duration_days=1,
+        days_per_week=1,
         price=Decimal("45.00"),
         is_active=True,
     )
@@ -112,6 +113,7 @@ def _setup_transit_fixtures(
         name="Monthly Transit Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("750.00"),
         is_active=True,
     )
@@ -119,6 +121,7 @@ def _setup_transit_fixtures(
         name="Term Transit Pass",
         plan_type=SubscriptionPlanType.TERM,
         duration_days=90,
+        days_per_week=5,
         price=Decimal("2000.00"),
         is_active=True,
     )
@@ -215,11 +218,8 @@ def test_daily_subscription_creation_and_contract(
 
     start_d = datetime.now(timezone.utc).date() + timedelta(days=5)
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
         "start_date": start_d.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "VODAFONE_CASH",
         "transaction_reference": "VF-DAILY-12345",
     }
@@ -228,13 +228,17 @@ def test_daily_subscription_creation_and_contract(
     data = res.json()
 
     assert data["student_id"] == student.id
-    assert data["route_id"] == fixtures["route1"].id
     assert data["plan_id"] == fixtures["plan_daily"].id
     assert float(data["price_snapshot"]) == 45.0
     assert data["start_date"] == start_d.isoformat()
-    assert data["end_date"] == start_d.isoformat()  # DAILY contract: single transportation service date
+    assert data["end_date"] == start_d.isoformat()  # DAILY contract: single service date
+    assert data["duration_days_snapshot"] == 1
+    assert data["days_per_week_snapshot"] == 1
     assert data["status"] == "PENDING"
     assert data["payment_id"] is not None
+    # Decoupled contract: subscription response carries no pickup selection
+    assert "outbound_pickup_point_id" not in data
+    assert "return_pickup_point_id" not in data
 
 
 def test_monthly_subscription_creation_and_contract(
@@ -250,11 +254,8 @@ def test_monthly_subscription_creation_and_contract(
     start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
     expected_end = _plan_end_date(start_d, 30)
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": start_d.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "CASH",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
@@ -283,11 +284,9 @@ def test_monthly_subscription_month_boundary_edge_cases(
     headers = {"Authorization": f"Bearer {student_token}"}
 
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": start_input.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
     assert res.status_code == 201
@@ -310,11 +309,9 @@ def test_term_subscription_duration_and_pricing(
     start_d = datetime.now(timezone.utc).date() + timedelta(days=1)
     expected_end = _plan_end_date(start_d, 90)
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_term"].id,
         "start_date": start_d.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
     assert res.status_code == 201
@@ -343,11 +340,9 @@ def test_independent_plan_pricing_and_price_snapshot_immutability(
     # Create monthly subscription
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
     assert res.status_code == 201
@@ -380,15 +375,14 @@ def test_subscription_payment_lifecycle_unverified_to_active(
     ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
-    # 1. Create subscription with unverified payment
+    # 1. Create subscription with a digital payment reference (required upfront
+    #    for digital methods): the payment is born SUBMITTED, subscription PENDING.
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "INSTAPAY",
+        "transaction_reference": "INSTA-TX-000111",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=student_headers)
     assert res.status_code == 201
@@ -400,21 +394,11 @@ def test_subscription_payment_lifecycle_unverified_to_active(
     res_qr = client_with_db.get(f"/api/v1/subscriptions/{sub_id}/qr", headers=student_headers)
     assert res_qr.status_code == 422
 
-    # 3. Student submits payment reference -> payment is SUBMITTED, subscription is still PENDING
-    res_submit = client_with_db.patch(
-        f"/api/v1/payments/{pay_id}/submit",
-        json={"transaction_reference": "INSTA-TX-998811"},
-        headers=student_headers,
-    )
-    assert res_submit.status_code == 200
-    assert res_submit.json()["status"] == "SUBMITTED"
-
-    res_sub_check = client_with_db.get(f"/api/v1/subscriptions/{sub_id}", headers=student_headers)
-    assert res_sub_check.json()["status"] == "PENDING"
-
-    # QR still blocked
-    res_qr_blocked = client_with_db.get(f"/api/v1/subscriptions/{sub_id}/qr", headers=student_headers)
-    assert res_qr_blocked.status_code == 422
+    # 3. Payment is already SUBMITTED (reference provided at subscription time)
+    res_pay_check = client_with_db.get(f"/api/v1/payments/{pay_id}", headers=student_headers)
+    assert res_pay_check.status_code == 200
+    assert res_pay_check.json()["status"] == "SUBMITTED"
+    assert res_pay_check.json()["transaction_reference"] == "INSTA-TX-000111"
 
     # 4. CEO verifies payment -> Subscription activates automatically
     res_verify = client_with_db.patch(f"/api/v1/payments/{pay_id}/verify", headers=ceo_headers)
@@ -447,11 +431,8 @@ def test_subscription_payment_rejection_lifecycle(
 
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "VODAFONE_CASH",
         "transaction_reference": "VF-FAKE-TX",
     }
@@ -491,31 +472,27 @@ def test_overlapping_subscription_same_route_active_and_pending_rejected(
     today = datetime.now(timezone.utc).date()
     # 1. Create first subscription (1 calendar month)
     payload1 = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res1 = client_with_db.post("/api/v1/subscriptions", json=payload1, headers=headers)
     assert res1.status_code == 201
 
-    # 2. Attempt overlapping subscription on same route while first is PENDING -> 409 Conflict
+    # 2. Attempt overlapping subscription while first is PENDING -> 409 Conflict
     payload_overlap = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
         "start_date": (today + timedelta(days=10)).isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res_overlap = client_with_db.post("/api/v1/subscriptions", json=payload_overlap, headers=headers)
     assert res_overlap.status_code == 409
 
 
-def test_non_overlapping_and_different_route_subscriptions_allowed(
+def test_non_overlapping_subscriptions_allowed_after_cancellation(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Verify subscriptions on different routes are allowed, and new subscriptions on the same route are allowed after cancellation or expiration."""
+    """A new subscription is allowed after the previous one is cancelled."""
     fixtures = _setup_transit_fixtures(db_session)
     student, student_token = _create_user_and_token(
         db_session, "student_non_overlap@ra7al.edu", RoleEnum.STUDENT
@@ -524,163 +501,67 @@ def test_non_overlapping_and_different_route_subscriptions_allowed(
 
     today = datetime.now(timezone.utc).date()
 
-    # 1. Subscription on Route 1
+    # 1. Subscription starting today
     payload1 = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
         "start_date": today.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res1 = client_with_db.post("/api/v1/subscriptions", json=payload1, headers=headers)
     assert res1.status_code == 201
     sub1_id = res1.json()["id"]
 
-    # 2. Subscription on Route 2 on the same date -> ALLOWED (different route scope)
-    payload_route2 = {
-        "route_id": fixtures["route2"].id,
-        "plan_id": fixtures["plan_daily"].id,
-        "start_date": today.isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route2"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
-    }
-    res_route2 = client_with_db.post("/api/v1/subscriptions", json=payload_route2, headers=headers)
-    assert res_route2.status_code == 201
-
-    # 3. Cancel the Route 1 pending subscription
+    # 2. Cancel it
     res_cancel = client_with_db.patch(f"/api/v1/subscriptions/{sub1_id}/cancel", headers=headers)
     assert res_cancel.status_code == 200
 
-    # 4. Create a new subscription on Route 1 after cancellation -> ALLOWED
+    # 3. A new subscription after cancellation -> ALLOWED
     payload_after_cancel = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_daily"].id,
         "start_date": (today + timedelta(days=5)).isoformat(),
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res_after_cancel = client_with_db.post("/api/v1/subscriptions", json=payload_after_cancel, headers=headers)
     assert res_after_cancel.status_code == 201
 
 
 # =========================================================================
-# PART 2: PICKUP / RETURN TESTS
+# PART 2: DECOUPLED SUBSCRIPTION CONTRACT
 # =========================================================================
 
-def test_same_return_pickup_mode_normalizes_to_outbound(
+def test_subscription_creation_ignores_legacy_route_pickup_fields(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Verify SAME_AS_OUTBOUND return pickup mode always sets return pickup to outbound pickup point."""
+    """Route/pickup-point fields are no longer part of subscription creation.
+
+    Extra fields are ignored by the schema; the created subscription must NOT
+    carry any route/pickup selection. Pickup selection happens per-day through
+    the daily reservation workflow.
+    """
     fixtures = _setup_transit_fixtures(db_session)
     student, student_token = _create_user_and_token(
-        db_session, "student_same_pickup@ra7al.edu", RoleEnum.STUDENT
+        db_session, "student_legacy_fields@ra7al.edu", RoleEnum.STUDENT
     )
     headers = {"Authorization": f"Bearer {student_token}"}
 
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
+        "payment_method": "CASH",
+        # Legacy fields — accepted-but-ignored by the API, never persisted:
+        "route_id": fixtures["route1"].id,
         "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
-        "return_pickup_point_id": fixtures["p2_route1"].id,  # Provided alternate ID must be normalized
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
     assert res.status_code == 201
     data = res.json()
 
-    assert data["return_pickup_mode"] == "SAME_AS_OUTBOUND"
-    assert data["outbound_pickup_point_id"] == fixtures["p1_route1"].id
-    assert data["return_pickup_point_id"] == fixtures["p1_route1"].id  # Normalized to outbound pickup
-
-
-def test_different_return_pickup_mode_persisted_correctly(
-    client_with_db: TestClient, db_session: Session
-) -> None:
-    """Verify DIFFERENT return pickup mode correctly validates and persists different return pickup on same route."""
-    fixtures = _setup_transit_fixtures(db_session)
-    student, student_token = _create_user_and_token(
-        db_session, "student_diff_pickup@ra7al.edu", RoleEnum.STUDENT
-    )
-    headers = {"Authorization": f"Bearer {student_token}"}
-
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    payload = {
-        "route_id": fixtures["route1"].id,
-        "plan_id": fixtures["plan_monthly"].id,
-        "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "DIFFERENT",
-        "return_pickup_point_id": fixtures["p2_route1"].id,
-    }
-    res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
-    assert res.status_code == 201
-    data = res.json()
-
-    assert data["return_pickup_mode"] == "DIFFERENT"
-    assert data["outbound_pickup_point_id"] == fixtures["p1_route1"].id
-    assert data["return_pickup_point_id"] == fixtures["p2_route1"].id
-
-
-def test_pickup_from_another_route_rejected(
-    client_with_db: TestClient, db_session: Session
-) -> None:
-    """Verify that selecting a pickup point belonging to another route is rejected with 422."""
-    fixtures = _setup_transit_fixtures(db_session)
-    student, student_token = _create_user_and_token(
-        db_session, "student_wrong_route_pickup@ra7al.edu", RoleEnum.STUDENT
-    )
-    headers = {"Authorization": f"Bearer {student_token}"}
-
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    # Outbound on Route 1, Return pickup from Route 2 -> Rejected
-    payload = {
-        "route_id": fixtures["route1"].id,
-        "plan_id": fixtures["plan_monthly"].id,
-        "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "DIFFERENT",
-        "return_pickup_point_id": fixtures["p1_route2"].id,  # From Route 2
-    }
-    res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
-    assert res.status_code == 422
-
-    # Outbound pickup from Route 2 for Route 1 subscription -> Rejected
-    payload_outbound_wrong = {
-        "route_id": fixtures["route1"].id,
-        "plan_id": fixtures["plan_monthly"].id,
-        "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route2"].id,  # From Route 2
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
-    }
-    res_outbound_wrong = client_with_db.post(
-        "/api/v1/subscriptions", json=payload_outbound_wrong, headers=headers
-    )
-    assert res_outbound_wrong.status_code == 422
-
-
-def test_different_mode_without_return_pickup_id_rejected(
-    client_with_db: TestClient, db_session: Session
-) -> None:
-    """Verify that DIFFERENT return pickup mode without return_pickup_point_id is rejected."""
-    fixtures = _setup_transit_fixtures(db_session)
-    student, student_token = _create_user_and_token(
-        db_session, "student_missing_ret_id@ra7al.edu", RoleEnum.STUDENT
-    )
-    headers = {"Authorization": f"Bearer {student_token}"}
-
-    today_str = datetime.now(timezone.utc).date().isoformat()
-    payload = {
-        "route_id": fixtures["route1"].id,
-        "plan_id": fixtures["plan_monthly"].id,
-        "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "DIFFERENT",
-        "return_pickup_point_id": None,
-    }
-    res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
-    assert res.status_code == 422
+    # Legacy fields are ignored: the response exposes no pickup selection.
+    assert "outbound_pickup_point_id" not in data
+    assert "return_pickup_point_id" not in data
+    assert data["days_per_week_snapshot"] == 4
 
 
 # =========================================================================
@@ -704,11 +585,9 @@ def test_ceo_global_subscription_visibility_and_filters(
     # Student subscribes
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res_sub = client_with_db.post("/api/v1/subscriptions", json=payload, headers=student_headers)
     assert res_sub.status_code == 201
@@ -716,7 +595,7 @@ def test_ceo_global_subscription_visibility_and_filters(
 
     # CEO lists all subscriptions
     res_list = client_with_db.get(
-        f"/api/v1/subscriptions?route_id={fixtures['route1'].id}&status=PENDING",
+        f"/api/v1/subscriptions?status=PENDING",
         headers=ceo_headers,
     )
     assert res_list.status_code == 200
@@ -748,11 +627,9 @@ def test_student_subscription_cancellation_lifecycle(
     # Create subscription
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
-        "route_id": fixtures["route1"].id,
         "plan_id": fixtures["plan_monthly"].id,
         "start_date": today_str,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
+        "payment_method": "CASH",
     }
     res_create = client_with_db.post("/api/v1/subscriptions", json=payload, headers=student_headers)
     assert res_create.status_code == 201

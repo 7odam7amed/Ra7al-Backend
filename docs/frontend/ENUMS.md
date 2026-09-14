@@ -122,14 +122,14 @@ Travel direction. Used on: `POST /boarding/scan` request, boarding records/histo
 | `OUTBOUND` | Going trip scan |
 | `RETURN` | Return trip scan |
 
-## ReturnPickupMode
+## ReturnPickupMode (REMOVED)
 
-How the return pickup point is chosen at subscription purchase. Used on: `SubscriptionCreateRequest.return_pickup_mode`, `SubscriptionResponse.return_pickup_mode`.
+**This enum no longer exists in the API.** Return pickup choice moved to the per-day reservation (`ReservationCreateRequest.return_pickup_point_id`); the subscription contract has no `return_pickup_mode` field. Kept here only as a migration note for older frontends.
 
-| Value | Meaning |
+| Legacy value | Meaning (historical) |
 |---|---|
-| `SAME_AS_OUTBOUND` | Return point = outbound point (default) |
-| `DIFFERENT` | Requires explicit `return_pickup_point_id` |
+| `SAME_AS_OUTBOUND` | Return point = outbound point (old subscription-level default) |
+| `DIFFERENT` | Required an explicit `return_pickup_point_id` at purchase (removed) |
 
 ---
 

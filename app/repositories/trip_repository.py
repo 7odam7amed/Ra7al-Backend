@@ -133,6 +133,13 @@ class TripRepository:
         )
         return (self.db.scalar(stmt) or 0) > 0
 
+    def supervisor_has_any_trip(self, supervisor_id: int) -> bool:
+        """Return whether the supervisor is assigned to at least one trip."""
+        stmt = select(func.count(Trip.id)).where(
+            Trip.supervisor_id == supervisor_id,
+        )
+        return (self.db.scalar(stmt) or 0) > 0
+
     def supervisor_has_trip_on_bus(self, supervisor_id: int, bus_id: int) -> bool:
         """Return whether the supervisor is assigned to any trip using the specified bus."""
         stmt = select(func.count(Trip.id)).where(

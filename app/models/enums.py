@@ -125,7 +125,12 @@ class BoardingDirection(enum.StrEnum):
 
 
 class ReturnPickupMode(enum.StrEnum):
-    """Selection mode for return trip pickup point."""
+    """DEPRECATED legacy enum: selection mode for the subscription-level return trip pickup point.
+
+    The subscription contract no longer carries return-pickup selection
+    (migration 015); return pickup is chosen per day on the reservation.
+    Retained only so historical references resolve; do not use in new code.
+    """
 
     SAME_AS_OUTBOUND = "SAME_AS_OUTBOUND"
     DIFFERENT = "DIFFERENT"

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.exceptions.base import ConflictError
 from app.models.boarding import BoardingRecord
 from app.models.enums import BoardingDirection
+from app.models.reservation import Reservation
 from app.models.subscription import Subscription
 
 
@@ -69,6 +70,52 @@ class BoardingRepository:
         )
         return self.db.execute(stmt).scalar_one()
 
+    def count_distinct_usage_days(
+        self, subscription_id: int, window_start: date, window_end: date
+    ) -> int:
+        """Count DISTINCT calendar dates with any successful scan in a window.
+
+        Outbound and return scans on the same date count as ONE usage day.
+        The window is inclusive on both ends.
+
+        Implementation note: each scanned row's calendar date is compared in
+        Python against the set of window dates. A single indexed range scan
+        fetches the (few) timestamps inside the window, so the cost is still
+        O(rows in window), not O(all subscription rows).
+        """
+        from app.utils.dates import day_bounds
+
+        start_dt, _ = day_bounds(window_start)
+        _, end_dt = day_bounds(window_end)
+        stmt = (
+            select(BoardingRecord.boarded_at)
+            .where(
+                BoardingRecord.subscription_id == subscription_id,
+                BoardingRecord.boarded_at >= start_dt,
+                BoardingRecord.boarded_at < end_dt,
+            )
+        )
+        window_dates = {
+            window_start + timedelta(days=i)
+            for i in range((window_end - window_start).days + 1)
+        }
+        distinct = {
+            ts.date() if ts.tzinfo is None else ts.astimezone(timezone.utc).date()
+            for ts in self.db.execute(stmt).scalars().all()
+        }
+        return len(distinct & window_dates)
+
+    def count_usages_for_subscription_between(
+        self, subscription_id: int, start_dt: datetime, end_dt: datetime
+    ) -> int:
+        """Count scans for a subscription within [start_dt, end_dt)."""
+        stmt = select(func.count(BoardingRecord.id)).where(
+            BoardingRecord.subscription_id == subscription_id,
+            BoardingRecord.boarded_at >= start_dt,
+            BoardingRecord.boarded_at < end_dt,
+        )
+        return int(self.db.execute(stmt).scalar_one() or 0)
+
     def count_usages_for_subscription_on_date(
         self, subscription_id: int, usage_date: datetime
     ) -> int:
@@ -85,6 +132,59 @@ class BoardingRepository:
             BoardingRecord.boarded_at < day_end,
         )
         return self.db.execute(stmt).scalar_one()
+
+    def distinct_usage_days_for_subscriptions(
+        self, subscription_ids: list[int], week_start: date
+    ) -> dict[int, int]:
+        """Batch distinct usage days in the current week per subscription.
+
+        Counts DISTINCT calendar dates (Mon-Sun window starting at week_start)
+        with at least one successful scan. Outbound + return on the same date
+        count as ONE usage day.
+        """
+        empty: dict[int, int] = {}
+        if not subscription_ids:
+            return empty
+        from app.utils.dates import day_bounds
+
+        start_dt, _ = day_bounds(week_start)
+        _, end_dt = day_bounds(week_start + timedelta(days=6))
+        stmt = (
+            select(
+                BoardingRecord.subscription_id,
+                BoardingRecord.boarded_at,
+            )
+            .where(
+                BoardingRecord.subscription_id.in_(subscription_ids),
+                BoardingRecord.boarded_at >= start_dt,
+                BoardingRecord.boarded_at < end_dt,
+            )
+        )
+        window_dates = {
+            week_start + timedelta(days=i) for i in range(7)
+        }
+        per_sub: dict[int, set] = {}
+        for sub_id, ts in self.db.execute(stmt).all():
+            per_sub.setdefault(int(sub_id), set()).add(
+                ts.date() if ts.tzinfo is None else ts.astimezone(timezone.utc).date()
+            )
+        return {
+            sub_id: len(days & window_dates) for sub_id, days in per_sub.items()
+        }
+
+    def count_confirmed_reservations(
+        self, subscription_id: int, service_date_from: date
+    ) -> int:
+        """Count CONFIRMED daily selections linked to a subscription on/after a date."""
+        stmt = (
+            select(func.count(Reservation.id))
+            .where(
+                Reservation.subscription_id == subscription_id,
+                Reservation.status == ReservationStatus.CONFIRMED,
+                Reservation.service_date >= service_date_from,
+            )
+        )
+        return int(self.db.execute(stmt).scalar_one() or 0)
 
     def usage_counts_for_subscriptions_today(
         self, subscription_ids: list[int]

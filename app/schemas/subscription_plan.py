@@ -4,7 +4,7 @@ import math
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import SubscriptionPlanType
-from app.models.subscription_plan import MAX_PLAN_DURATION_DAYS
+from app.models.subscription_plan import MAX_PLAN_DURATION_DAYS, MAX_PLAN_DAYS_PER_WEEK
 
 
 class SubscriptionPlanBase(BaseModel):
@@ -22,8 +22,11 @@ class SubscriptionPlanBase(BaseModel):
 class SubscriptionPlanCreate(SubscriptionPlanBase):
     """Schema for creating a new subscription plan (CEO only).
 
-    The CEO enters the duration freely; the package's configured duration_days is
-    the single source of truth for subscription validity and renewal calculations.
+    duration_days: calendar days the subscription stays valid (inclusive of
+    the start date). days_per_week: maximum DISTINCT usage days per calendar
+    week (Mon-Sun, UTC) — outbound + return scans on the same day count as ONE
+    usage day. These values are snapshotted onto subscriptions at purchase so
+    later plan edits never change an active student's behavior.
     """
 
     duration_days: int = Field(
@@ -31,9 +34,19 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
         gt=0,
         le=MAX_PLAN_DURATION_DAYS,
         description=(
-            "Duration in days (CEO-defined). Examples: DAILY=1, WEEKLY=7, "
-            "MONTHLY=30 or 45, TERM=90 or 120."
+            "Validity in calendar days (CEO-defined). Examples: DAILY=1, "
+            "WEEKLY=7, MONTHLY=30 or 45, TERM=90 or 120."
         ),
+    )
+    days_per_week: int = Field(
+        ...,
+        gt=0,
+        le=MAX_PLAN_DAYS_PER_WEEK,
+        description=(
+            "Maximum DISTINCT usage days per calendar week (Mon-Sun, UTC). "
+            "Outbound + return on the same day count as ONE usage day."
+        ),
+        examples=[4],
     )
 
     @model_validator(mode="after")
@@ -53,7 +66,11 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
 
 
 class SubscriptionPlanUpdate(BaseModel):
-    """Schema for updating an existing subscription plan (CEO only)."""
+    """Schema for updating an existing subscription plan (CEO only).
+
+    Editing duration_days/days_per_week affects only FUTURE subscriptions:
+    active subscriptions keep the values snapshotted at purchase time.
+    """
 
     name: str | None = Field(default=None, min_length=2, max_length=100)
     price: Decimal | None = Field(default=None, gt=0, decimal_places=2)
@@ -61,7 +78,13 @@ class SubscriptionPlanUpdate(BaseModel):
         default=None,
         gt=0,
         le=MAX_PLAN_DURATION_DAYS,
-        description="Optional new CEO-defined duration in days",
+        description="Optional new CEO-defined validity in days",
+    )
+    days_per_week: int | None = Field(
+        default=None,
+        gt=0,
+        le=MAX_PLAN_DAYS_PER_WEEK,
+        description="Optional new weekly usage-day allowance",
     )
     is_active: bool | None = None
 
@@ -91,6 +114,7 @@ class SubscriptionPlanResponse(BaseModel):
     name: str
     plan_type: SubscriptionPlanType
     duration_days: int
+    days_per_week: int
     price: Decimal
     currency: str
     is_active: bool

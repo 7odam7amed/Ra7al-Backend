@@ -1,5 +1,6 @@
 """Integration tests for the bus image feature: upload, replace, remove, and access control."""
 import io
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -301,11 +302,22 @@ def test_student_with_reservation_can_access_bus_image(
 ) -> None:
     from datetime import datetime, timedelta, timezone
 
+    import hashlib
+    import secrets
+
     from app.models.bus import Bus
-    from app.models.enums import BusStatus, ReservationStatus, TripStatus
+    from app.models.enums import (
+        BusStatus,
+        ReservationStatus,
+        SubscriptionPlanType,
+        SubscriptionStatus,
+        TripStatus,
+    )
     from app.models.reservation import Reservation
     from app.models.route import Route
     from app.models.station import Station
+    from app.models.subscription import Subscription
+    from app.models.subscription_plan import SubscriptionPlan
     from app.models.trip import Trip
 
     ceo, ceo_token = _create_user_and_token(db_session, "ceo_img_yes@ra7al.edu", RoleEnum.CEO)
@@ -347,10 +359,39 @@ def test_student_with_reservation_can_access_bus_image(
     db_session.add(trip)
     db_session.commit()
 
+    # The student needs an active subscription to hold a daily reservation.
+    plan = SubscriptionPlan(
+        name="Img Plan",
+        plan_type=SubscriptionPlanType.MONTHLY,
+        duration_days=30,
+        days_per_week=4,
+        price=Decimal("500.00"),
+    )
+    db_session.add(plan)
+    db_session.flush()
+
+    raw = secrets.token_urlsafe(16)
+    subscription = Subscription(
+        student_id=student.id,
+        plan_id=plan.id,
+        price_snapshot=plan.price,
+        duration_days_snapshot=plan.duration_days,
+        days_per_week_snapshot=plan.days_per_week,
+        start_date=now.date(),
+        end_date=now.date() + timedelta(days=29),
+        qr_token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        qr_token=raw,
+        status=SubscriptionStatus.ACTIVE,
+    )
+    db_session.add(subscription)
+    db_session.commit()
+
     db_session.add(
         Reservation(
             trip_id=trip.id,
             student_id=student.id,
+            subscription_id=subscription.id,
+            service_date=trip.departure_time.date(),
             status=ReservationStatus.CONFIRMED,
         )
     )

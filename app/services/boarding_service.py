@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 
 from app.exceptions.base import (
@@ -9,14 +9,15 @@ from app.exceptions.base import (
 )
 from app.models.enums import (
     BoardingDirection,
+    ReservationStatus,
     RoleEnum,
-    SubscriptionPlanType,
     SubscriptionStatus,
     TripStatus,
 )
 from app.models.user import User
 from app.repositories.boarding_repository import BoardingRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
+from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.repositories.trip_repository import TripRepository
 from app.schemas.boarding import (
@@ -26,15 +27,31 @@ from app.schemas.boarding import (
     BoardingStudentSummary,
     SupervisorTripStudentResponse,
 )
+from app.utils.dates import business_today, day_bounds, week_start as week_start_for
 
-# Business rule: exactly two QR usages are granted per calendar day
-# (one outbound and one return). The total allowance for a subscription is
-# derived from the plan: max_qr_usages = duration_days * 2.
-QR_USAGES_PER_DAY = 2
+# Business rule: each usage day allows exactly two scans — one OUTBOUND and
+# one RETURN on the same calendar date. Outbound + return on the same day
+# together count as ONE usage day, never two.
+SCANS_PER_USAGE_DAY = 2
 
 
 class BoardingService:
-    """Business logic for QR scanning, boarding verification, duplicate protection, and attendance."""
+    """Business logic for QR scanning, daily-selection authorization, weekly usage limits, and attendance.
+
+    QR authorization chain (all server-side, in order):
+      1. Supervisor role + trip assignment + trip status.
+      2. QR token resolves to a real subscription.
+      3. Student account valid; subscription ACTIVE and within validity dates.
+      4. A CONFIRMED daily reservation exists for the trip's service date,
+         belongs to this student/subscription, and covers the scan direction.
+      5. Scanned pickup point matches the reservation's selected point for the
+         direction and belongs to the scanned trip.
+      6. Duplicate scan protection (subscription/trip/direction unique).
+      7. Weekly distinct-usage-day limit: days_per_week (Mon-Sun, UTC). The
+         subscription row is locked FOR UPDATE before the limit is re-checked
+         and the boarding record inserted, so concurrent scans cannot bypass
+         the weekly limit.
+    """
 
     def __init__(
         self,
@@ -42,16 +59,18 @@ class BoardingService:
         subscription_repo: SubscriptionRepository,
         trip_repo: TripRepository,
         pickup_point_repo: PickupPointRepository,
+        reservation_repo: ReservationRepository,
     ) -> None:
         self.boarding_repo = boarding_repo
         self.subscription_repo = subscription_repo
         self.trip_repo = trip_repo
         self.pickup_point_repo = pickup_point_repo
+        self.reservation_repo = reservation_repo
 
     def scan_boarding(
         self, current_user: User, data: BoardingScanRequest
     ) -> BoardingResponse:
-        """Verify and record a student's boarding scan."""
+        """Verify and record a student's boarding scan against the weekly usage-day rule."""
         # 1. Role verification
         if current_user.role != RoleEnum.SUPERVISOR:
             raise ForbiddenError("Only SUPERVISOR users can perform boarding scans")
@@ -61,14 +80,25 @@ class BoardingService:
         if trip is None:
             raise NotFoundError(f"Trip with ID {data.trip_id} not found")
 
+        # Supervisor must be assigned to this trip (authorization before any
+        # business-state detail is revealed).
+        if trip.supervisor_id != current_user.id:
+            raise ForbiddenError("You are not assigned as the supervisor for this trip")
+
         if trip.status in (TripStatus.CANCELLED, TripStatus.COMPLETED):
             raise ValidationError(
                 f"Cannot record boarding for trip with status '{trip.status.value}'"
             )
 
-        # Supervisor must be assigned to this trip
-        if trip.supervisor_id != current_user.id:
-            raise ForbiddenError("You are not assigned as the supervisor for this trip")
+        # Boarding is recorded in real time on the travel day: a trip may only
+        # be scanned on its own service date (prevents scanning future trips
+        # and keeps usage-day accounting aligned with the calendar date).
+        trip_date = trip.departure_time.date()
+        today_pre = business_today()
+        if trip_date != today_pre:
+            raise ValidationError(
+                "Boarding can only be recorded on the trip's service date"
+            )
 
         # 3. QR Token lookup by SHA-256 hash
         token_clean = data.qr_token.strip()
@@ -86,8 +116,8 @@ class BoardingService:
         if subscription.student.role != RoleEnum.STUDENT:
             raise ValidationError("Subscription does not belong to a student")
 
-        # 5. Check subscription validity dates & auto-expiration
-        today = datetime.now(timezone.utc).date()
+        # 5. Subscription validity dates & auto-expiration (expiration always wins)
+        today = business_today()
         if today > subscription.end_date:
             if subscription.status == SubscriptionStatus.ACTIVE:
                 self.subscription_repo.update_status(
@@ -98,7 +128,6 @@ class BoardingService:
         if today < subscription.start_date:
             raise ValidationError("Subscription is not yet valid for today's date")
 
-        # 6. Check subscription status
         if subscription.status == SubscriptionStatus.CANCELLED:
             raise ValidationError("Subscription is cancelled")
         if subscription.status == SubscriptionStatus.EXPIRED:
@@ -108,46 +137,55 @@ class BoardingService:
                 f"Subscription is not active (current status: {subscription.status.value})"
             )
 
-        # 7. Route match check
-        if subscription.route_id != trip.route_id:
+        # 6. Daily reservation authorization: the student must have selected
+        #    this trip for today (the trip's service date), and the selection
+        #    must cover the direction.
+        service_date = trip_date
+        reservation = self.reservation_repo.get_active_for_student_and_date(
+            subscription.student_id, service_date
+        )
+        if reservation is None:
             raise ValidationError(
-                f"Subscription is for Route {subscription.route_id}, but this trip is on Route {trip.route_id}"
+                "No confirmed daily transportation selection found for this trip's date"
             )
-
-        # 7b. QR usage allowance checks (CEO-defined duration model).
-        # The plan's duration_days represents usable days, and each usage day
-        # grants two QR usages (one outbound + one return):
-        #     max_qr_usages = duration_days * 2
-        # Calendar days without a scan do NOT consume the allowance; only
-        # successful scans do (boarding records are the source of truth).
-        duration_days = subscription.plan.duration_days if subscription.plan else 1
-        if duration_days < 1:
-            duration_days = 1
-        max_qr_usages = duration_days * 2
-        used_qr_usages = self.boarding_repo.count_usages_for_subscription(subscription.id)
-        if used_qr_usages >= max_qr_usages:
+        if reservation.subscription_id != subscription.id:
             raise ValidationError(
-                "QR usage allowance exhausted: the subscription has used all "
-                f"{max_qr_usages} allowed QR usages ({duration_days} days x 2 trips per day)"
+                "Daily transportation selection does not belong to this subscription"
             )
-
-        # 8. Direction and Pickup Point check
+        if reservation.trip_id != trip.id:
+            raise ValidationError(
+                "Daily transportation selection is not for this trip"
+            )
         if data.direction == BoardingDirection.OUTBOUND:
-            if data.pickup_point_id != subscription.outbound_pickup_point_id:
+            if reservation.direction_mode == "RETURN_ONLY":
                 raise ValidationError(
-                    "Scanned pickup point does not match student's configured outbound pickup point"
+                    "Daily transportation selection does not include an outbound journey"
                 )
-        elif data.direction == BoardingDirection.RETURN:
-            if data.pickup_point_id != subscription.return_pickup_point_id:
+            selected_point_id = reservation.outbound_pickup_point_id
+            if selected_point_id is None:
                 raise ValidationError(
-                    "Scanned pickup point does not match student's configured return pickup point"
+                    "Daily transportation selection has no outbound pickup point"
                 )
+        else:
+            if reservation.direction_mode == "OUTBOUND_ONLY":
+                raise ValidationError(
+                    "Daily transportation selection does not include a return journey"
+                )
+            selected_point_id = reservation.return_pickup_point_id
+            if selected_point_id is None:
+                raise ValidationError(
+                    "Daily transportation selection has no return pickup point"
+                )
+        if data.pickup_point_id != selected_point_id:
+            raise ValidationError(
+                "Scanned pickup point does not match the selected pickup point for this trip"
+            )
 
         pickup_point = self.pickup_point_repo.get_by_id(data.pickup_point_id)
         if pickup_point is None or pickup_point.trip_id != trip.id:
             raise ValidationError("Scanned pickup point is not configured for this trip")
 
-        # 9. Duplicate Boarding Check (prevent duplicate scan for same trip & direction)
+        # 7. Duplicate Boarding Check (prevent duplicate scan for same trip & direction)
         if self.boarding_repo.exists_for_trip_direction(
             subscription.id, trip.id, data.direction
         ):
@@ -155,11 +193,11 @@ class BoardingService:
                 f"Student has already boarded {data.direction.value} for this trip"
             )
 
-        # 10. Record the boarding and consume exactly ONE usage, atomically.
-        # The subscription row is locked first so concurrent scans serialize:
-        # after acquiring the lock, every limit (daily and total) is re-checked
-        # against committed data, so two simultaneous scans can never push the
-        # usage past duration_days * 2 or past 2 per calendar day.
+        # 8. Record the boarding under a row lock so concurrent scans serialize.
+        # After acquiring the lock, the weekly distinct-usage-day limit is
+        # re-checked against committed data: two simultaneous requests can
+        # never push the week past days_per_week distinct usage days, and a
+        # third scan of the same day (any direction) can never happen.
         now_utc = datetime.now(timezone.utc)
         locked_subscription = self.boarding_repo.get_subscription_row_for_update(
             subscription.id
@@ -171,23 +209,42 @@ class BoardingService:
                 f"Subscription is not active (current status: {locked_subscription.status.value})"
             )
 
-        max_qr_usages = duration_days * 2
-        used_qr_usages = self.boarding_repo.count_usages_for_subscription(
-            locked_subscription.id
+        w_start = week_start_for(now_utc.date())
+        w_end = w_start + timedelta(days=6)
+        used_days_this_week = self.boarding_repo.count_distinct_usage_days(
+            locked_subscription.id, w_start, w_end
         )
-        if used_qr_usages >= max_qr_usages:
-            raise ValidationError(
-                "QR usage allowance exhausted: the subscription has used all "
-                f"{max_qr_usages} allowed QR usages ({duration_days} days x 2 trips per day)"
+        days_per_week = locked_subscription.days_per_week_snapshot
+
+        # Re-check duplicates under the lock (another transaction may have
+        # committed the same scan while this one waited).
+        if self.boarding_repo.exists_for_trip_direction(
+            locked_subscription.id, trip.id, data.direction
+        ):
+            raise ConflictError(
+                f"Student has already boarded {data.direction.value} for this trip"
             )
 
-        usages_today = self.boarding_repo.count_usages_for_subscription_on_date(
+        # At most 2 scans (one outbound + one return) per calendar day.
+        scans_today = self.boarding_repo.count_usages_for_subscription_on_date(
             locked_subscription.id, now_utc
         )
-        if usages_today >= QR_USAGES_PER_DAY:
+        if scans_today >= SCANS_PER_USAGE_DAY:
             raise ValidationError(
-                "Daily QR usage limit reached: at most "
-                f"{QR_USAGES_PER_DAY} QR usages per day (one outbound and one return)"
+                "Daily QR limit reached: at most "
+                f"{SCANS_PER_USAGE_DAY} scans per day (one outbound and one return)"
+            )
+
+        # Weekly limit: count DISTINCT usage days. If the week is exhausted but
+        # today already has a scan, this scan does not create a new usage day
+        # (outbound + return on the same day = ONE usage day) and is allowed.
+        if used_days_this_week >= days_per_week and not self._scan_extends_used_days(
+            locked_subscription.id, now_utc
+        ):
+            raise ValidationError(
+                f"Weekly usage limit reached: the subscription allows at most "
+                f"{days_per_week} usage days per week and all of them have been "
+                f"consumed. Unused weekly allowance does not roll over."
             )
 
         record = self.boarding_repo.create(
@@ -200,9 +257,10 @@ class BoardingService:
             boarded_at=now_utc,
         )
 
-        # Calendar expiration was already enforced above (step 5); a scan is
-        # only recorded while the subscription is within its validity window.
         student = subscription.student
+        usage_days_after = self.boarding_repo.count_distinct_usage_days(
+            locked_subscription.id, w_start, w_end
+        )
         return BoardingResponse(
             success=True,
             message="Boarding verified successfully",
@@ -214,19 +272,36 @@ class BoardingService:
                 academic_year=student.academic_year,
             ),
             subscription_id=subscription.id,
-            plan_type=subscription.plan.plan_type
-            if subscription.plan
-            else SubscriptionPlanType.MONTHLY,
             route_id=trip.route_id,
             direction=data.direction,
             pickup_point_id=data.pickup_point_id,
             boarded_at=record.boarded_at,
+            usage_days_this_week=usage_days_after,
+            remaining_usage_days_this_week=max(
+                days_per_week - usage_days_after, 0
+            ),
         )
+
+    def _scan_extends_used_days(self, subscription_id: int, now_utc: datetime) -> bool:
+        """Whether this scan would introduce a NEW usage day this week.
+
+        The weekly limit counts DISTINCT usage days. If today already has at
+        least one successful scan, an additional scan (the return journey) is
+        still allowed even when the weekly day allowance is exhausted, because
+        it does not create a new usage day.
+        """
+        day_start, day_end = day_bounds(now_utc.date())
+        stmt = (
+            self.boarding_repo.count_usages_for_subscription_between(
+                subscription_id, day_start, day_end
+            )
+        )
+        return stmt > 0
 
     def get_trip_subscribed_students(
         self, trip_id: int, current_user: User
     ) -> list[SupervisorTripStudentResponse]:
-        """Fetch list of students subscribed to the route of the specified trip."""
+        """Fetch students who selected this trip for the trip's service date."""
         trip = self.trip_repo.get_by_id(trip_id)
         if trip is None:
             raise NotFoundError(f"Trip with ID {trip_id} not found")
@@ -237,8 +312,8 @@ class BoardingService:
             raise ForbiddenError("You are not assigned as the supervisor for this trip")
 
         trip_date = trip.departure_time.date()
-        subscriptions = self.subscription_repo.list_active_for_route_on_date(
-            trip.route_id, trip_date
+        reservations = self.reservation_repo.list_confirmed_for_trip_and_date(
+            trip.id, trip_date
         )
 
         trip_records = self.boarding_repo.get_for_trip(trip_id)
@@ -248,40 +323,40 @@ class BoardingService:
         return_boarded_sub_ids = {
             r.subscription_id for r in trip_records if r.direction == BoardingDirection.RETURN
         }
-        stats = self.boarding_repo.stats_for_subscriptions([sub.id for sub in subscriptions])
-        last_boarded_map = {r.subscription_id: r.boarded_at for r in trip_records}
 
         students_response: list[SupervisorTripStudentResponse] = []
-        for sub in subscriptions:
-            student = sub.student
+        for reservation in reservations:
+            student = reservation.student
+            subscription = reservation.subscription
+            outbound_point = reservation.outbound_pickup_point
+            return_point = reservation.return_pickup_point
             students_response.append(
                 SupervisorTripStudentResponse(
                     student_id=student.id,
                     student_name=student.full_name,
-                    subscription_id=sub.id,
-                    subscription_type=sub.plan.plan_type
-                    if sub.plan
-                    else SubscriptionPlanType.MONTHLY,
-                    subscription_status=sub.status,
-                    start_date=sub.start_date,
-                    end_date=sub.end_date,
-                    outbound_pickup=sub.outbound_pickup_point.name
-                    if sub.outbound_pickup_point
-                    else None,
-                    return_pickup=sub.return_pickup_point.name
-                    if sub.return_pickup_point
-                    else None,
-                    payment_status=sub.payment.status if sub.payment else None,
-                    boarding_count=int(stats[sub.id]["total"]),
-                    outbound_boarding_count=int(stats[sub.id]["outbound"]),
-                    return_boarding_count=int(stats[sub.id]["return"]),
-                    outbound_boarded=sub.id in outbound_boarded_sub_ids,
-                    return_boarded=sub.id in return_boarded_sub_ids,
-                    last_boarded_at=last_boarded_map.get(sub.id),
+                    subscription_id=subscription.id,
+                    subscription_status=subscription.status,
+                    service_date=reservation.service_date,
+                    outbound_pickup=outbound_point.name if outbound_point else None,
+                    return_pickup=return_point.name if return_point else None,
+                    direction_mode=reservation.direction_mode,
+                    payment_status=subscription.payment.status if subscription.payment else None,
+                    outbound_boarded=subscription.id in outbound_boarded_sub_ids,
+                    return_boarded=subscription.id in return_boarded_sub_ids,
+                    last_boarded_at=self._last_boarded_for(trip_records, subscription.id),
                 )
             )
 
         return students_response
+
+    @staticmethod
+    def _last_boarded_for(trip_records, subscription_id: int) -> datetime | None:
+        times = [
+            r.boarded_at
+            for r in trip_records
+            if r.subscription_id == subscription_id
+        ]
+        return max(times) if times else None
 
     def get_trip_boarding_records(
         self, trip_id: int, current_user: User

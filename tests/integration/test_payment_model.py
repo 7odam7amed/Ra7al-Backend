@@ -1,5 +1,7 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
+import secrets
 import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -13,12 +15,16 @@ from app.models.enums import (
     PaymentStatus,
     ReservationStatus,
     RoleEnum,
+    SubscriptionPlanType,
+    SubscriptionStatus,
     TripStatus,
 )
 from app.models.payment import Payment
 from app.models.reservation import Reservation
 from app.models.route import Route
 from app.models.station import Station
+from app.models.subscription import Subscription
+from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
 from app.models.user import User
 
@@ -89,9 +95,39 @@ def _setup_entities(session: Session) -> tuple[Trip, Reservation, User, User]:
     session.commit()
     session.refresh(trip)
 
+    plan = SubscriptionPlan(
+        name=f"Plan PM {uid}",
+        plan_type=SubscriptionPlanType.MONTHLY,
+        duration_days=30,
+        days_per_week=4,
+        price=Decimal("500.00"),
+        is_active=True,
+    )
+    session.add(plan)
+    session.commit()
+
+    raw = secrets.token_urlsafe(16)
+    subscription = Subscription(
+        student_id=student.id,
+        plan_id=plan.id,
+        price_snapshot=plan.price,
+        duration_days_snapshot=plan.duration_days,
+        days_per_week_snapshot=plan.days_per_week,
+        start_date=date.today() - timedelta(days=1),
+        end_date=date.today() + timedelta(days=29),
+        qr_token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        qr_token=raw,
+        status=SubscriptionStatus.ACTIVE,
+    )
+    session.add(subscription)
+    session.commit()
+    session.refresh(subscription)
+
     reservation = Reservation(
         trip_id=trip.id,
         student_id=student.id,
+        subscription_id=subscription.id,
+        service_date=trip.departure_time.date(),
         status=ReservationStatus.CONFIRMED,
     )
     session.add(reservation)

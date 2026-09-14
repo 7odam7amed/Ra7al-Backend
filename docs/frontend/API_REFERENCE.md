@@ -105,8 +105,10 @@ Every HTTP endpoint exposed by the backend — **92 endpoints across 13 routers*
 ### Reservations — `/api/v1/reservations`
 | Method | Path | Auth | Roles | Docs |
 |---|---|---|---|---|
-| POST | `/reservations` | 🔒 | STUDENT | [Reservations](#reservations) |
+| POST | `/reservations` | 🔒 | STUDENT (active subscription) | [Reservations](#reservations) |
 | GET | `/reservations/available-trips` | 🔒 | any | [Reservations](#reservations) |
+| GET | `/reservations/my/tomorrow` | 🔒 | STUDENT | [Reservations](#reservations) |
+| PUT | `/reservations/my/tomorrow` | 🔒 | STUDENT | [Reservations](#reservations) |
 | GET | `/reservations/my` | 🔒 | STUDENT | [Reservations](#reservations) |
 | GET | `/reservations` | 🔒 | CEO, SUPERVISOR | [Reservations](#reservations) |
 | GET | `/reservations/{reservation_id}` | 🔒 | CEO, SUPERVISOR, owner student | [Reservations](#reservations) |
@@ -734,7 +736,9 @@ Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `422`.
 
 ---
 
-## Reservations
+## Reservations — Daily Transportation Selection
+
+A reservation is the student's DAILY selection: **trip + outbound pickup point + return pickup point for TOMORROW**. It requires an ACTIVE subscription but never modifies it. See [RESERVATIONS.md](RESERVATIONS.md).
 
 `ReservationResponse`:
 
@@ -743,17 +747,24 @@ Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `422`.
   "id": 101,
   "trip_id": 55,
   "student_id": 42,
+  "subscription_id": 88,
+  "service_date": "2026-09-15",
+  "outbound_pickup_point_id": 9,
+  "return_pickup_point_id": 12,
+  "direction_mode": "BOTH",
   "status": "CONFIRMED",
-  "booked_at": "2026-09-10T12:00:00Z",
+  "booked_at": "2026-09-14T12:00:00Z",
   "cancelled_at": null,
   "created_at": "...",
   "updated_at": "...",
   "trip": { "...": "TripResponse" },
-  "student": { "...": "UserResponse" }
+  "student": { "...": "UserResponse" },
+  "outbound_pickup_point": { "...": "PickupPointResponse" },
+  "return_pickup_point": { "...": "PickupPointResponse" }
 }
 ```
 
-`AvailableTripResponse` (for booking screens):
+`AvailableTripResponse` (for selection screens — trips departing TOMORROW):
 
 ```json
 {
@@ -779,25 +790,46 @@ Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `422`.
 }
 ```
 
-`pickup_points` lists the trip's gathering points ordered by `sequence` (empty list if the trip has none). Use these `id` values as `outbound_pickup_point_id` when purchasing a subscription.
+`pickup_points` lists the trip's gathering points ordered by `sequence` (empty list if the trip has none). Use these `id` values as `outbound_pickup_point_id` / `return_pickup_point_id` when creating the daily selection.
 
-### `POST /reservations` — STUDENT
-Request: `{ "trip_id": 55 }`.
-Server rules: trip must be `SCHEDULED`, departure in the future, no existing CONFIRMED reservation by this student on this trip (`409`), capacity available (`409` "No available seats").
-Response `201`: `ReservationResponse` (`status: "CONFIRMED"`).
+### `POST /reservations` — STUDENT with an ACTIVE subscription
+Request (`ReservationCreateRequest`) — there is **no `date` field**; the service date is always TOMORROW:
+
+```json
+{
+  "trip_id": 55,
+  "outbound_pickup_point_id": 9,
+  "return_pickup_point_id": 12,
+  "direction_mode": "BOTH"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `trip_id` | ✓ | must be a SCHEDULED trip departing TOMORROW |
+| `outbound_pickup_point_id` | conditional | required for `BOTH`/`OUTBOUND_ONLY`; must belong to the trip |
+| `return_pickup_point_id` | conditional | required for `BOTH`/`RETURN_ONLY`; must belong to the trip |
+| `direction_mode` | optional | `BOTH` (default) \| `OUTBOUND_ONLY` \| `RETURN_ONLY` |
+
+Server rules: ACTIVE subscription covering the service date required (`422` otherwise — PENDING is not usable), trip exists (`404`) + `SCHEDULED` (`422`) + departs tomorrow (`422`), pickup points belong to the trip (`422` otherwise — cross-route points ALWAYS rejected), no existing CONFIRMED selection for tomorrow (`409`), capacity available (`409` "No available seats").
+Response `201`: `ReservationResponse` (`status: "CONFIRMED"`, `service_date` = tomorrow).
 Errors: `403` (non-student), `404`, `409`, `422`.
 
 ### `GET /reservations/available-trips` — any authenticated
 Query: `page`, `page_size`, `route_id` (optional).
-Returns future `SCHEDULED` trips with `available_seats > 0`, each including the trip's ordered `pickup_points`. Response `200`: `PaginatedAvailableTripResponse`.
+Returns TOMORROW's `SCHEDULED` trips with `available_seats > 0`, each including the trip's ordered `pickup_points`. Response `200`: `PaginatedAvailableTripResponse`.
 
-> Students obtain valid `outbound_pickup_point_id` values from `pickup_points` in this response — no privileged endpoint required.
+### `GET /reservations/my/tomorrow` — STUDENT
+The student's selection for tomorrow. Response `200`: `ReservationResponse` / `404` if none.
+
+### `PUT /reservations/my/tomorrow` — STUDENT
+Replaces tomorrow's selection in place (same body as POST; re-validates trip/pickups/capacity). Response `200`: `ReservationResponse`. Errors: `404` (no existing selection), `422`, `409`.
 
 ### `GET /reservations/my` — STUDENT
-Query: `page`, `page_size`, `status` (ReservationStatus), `trip_id`. Response `200`: `PaginatedReservationResponse`.
+Query: `page`, `page_size`, `status` (ReservationStatus), `trip_id`, `service_date_from`, `service_date_to`. Response `200`: `PaginatedReservationResponse`.
 
 ### `GET /reservations` — CEO, SUPERVISOR
-Query: `page`, `page_size`, `trip_id`, `student_id`, `status`, `booked_after`, `booked_before`. Response `200`: `PaginatedReservationResponse`.
+Query: `page`, `page_size`, `trip_id`, `student_id`, `status`, `service_date_from`, `service_date_to`, `booked_after`, `booked_before`. Response `200`: `PaginatedReservationResponse`.
 
 ### `GET /reservations/{reservation_id}` — CEO, SUPERVISOR, owner student
 Response `200` / `403` / `404`.
@@ -906,6 +938,7 @@ Reason is appended to `notes`. Response `200`: `PaymentResponse` (`status: "REJE
   "name": "Weekly Standard",
   "plan_type": "WEEKLY",
   "duration_days": 7,
+  "days_per_week": 4,
   "price": "120.00",
   "currency": "EGP",
   "is_active": true,
@@ -914,16 +947,16 @@ Reason is appended to `notes`. Response `200`: `PaymentResponse` (`status: "REJE
 }
 ```
 
-> `duration_days` is **CEO-defined** per plan (1–730). Only DAILY is fixed to exactly 1. See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md).
+> `duration_days` is **CEO-defined** per plan (1–730). Only DAILY is fixed to exactly 1. `days_per_week` is the CEO-defined weekly usage-day allowance (1–7): the maximum DISTINCT usage DAYS per calendar week — NOT a QR-scan count. See [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md) and [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
 
 ### `POST /subscription-plans` — CEO
 Request:
 
 ```json
-{ "name": "Weekly Standard", "plan_type": "WEEKLY", "duration_days": 7, "price": "120.00" }
+{ "name": "Weekly Standard", "plan_type": "WEEKLY", "duration_days": 7, "days_per_week": 4, "price": "120.00" }
 ```
 
-- `name` 2–100 chars; `plan_type` enum; `duration_days` 1–730 (**DAILY must be exactly 1**); `price` > 0 (2 decimals); `currency` optional (default EGP).
+- `name` 2–100 chars; `plan_type` enum; `duration_days` 1–730 (**DAILY must be exactly 1**); `days_per_week` 1–7 (required); `price` > 0 (2 decimals); `currency` optional (default EGP).
 - Duplicate check: same (type, name, duration) → `409`.
 - Response `201`: `SubscriptionPlanResponse` (`is_active: true`). Errors: `403`, `409`, `422`.
 
@@ -935,7 +968,7 @@ Non-CEO callers always receive active plans only. Response `200`: `PaginatedSubs
 Response `200`: `SubscriptionPlanResponse` (including inactive plans). Errors: `404`.
 
 ### `PATCH /subscription-plans/{plan_id}` — CEO
-Optional: `name`, `price`, `duration_days` (1–730, DAILY stays 1), `is_active`. Response `200`. Errors: `403`, `404`, `422`.
+Optional: `name`, `price`, `duration_days` (1–730, DAILY stays 1), `days_per_week` (1–7), `is_active`. Editing these affects only FUTURE subscriptions — active subscriptions keep the values snapshotted at purchase. Response `200`. Errors: `403`, `404`, `422`.
 
 ### `PATCH /subscription-plans/{plan_id}/status` — CEO
 Request: `{ "is_active": false }`. Response `200`.
@@ -944,31 +977,28 @@ Request: `{ "is_active": false }`. Response `200`.
 
 ## Subscriptions
 
+A subscription is ONLY a plan purchase: `plan + start_date + payment_method (+ digital payment reference)`. **There is NO route, trip, or pickup-point selection in the subscription contract.** Daily transportation is chosen separately via [Reservations](#reservations--daily-transportation-selection).
+
 `SubscriptionResponse` (base):
 
 ```json
 {
   "id": 88,
   "student_id": 42,
-  "route_id": 10,
   "plan_id": 5,
   "price_snapshot": "120.00",
   "currency": "EGP",
   "start_date": "2026-09-14",
   "end_date": "2026-09-20",
-  "outbound_pickup_point_id": 9,
-  "return_pickup_point_id": 9,
-  "return_pickup_mode": "SAME_AS_OUTBOUND",
+  "duration_days_snapshot": 7,
+  "days_per_week_snapshot": 4,
   "payment_id": 400,
   "status": "PENDING",
   "created_at": "...",
   "updated_at": "...",
   "student": null,
-  "route": null,
   "plan": null,
-  "payment": null,
-  "outbound_pickup_point": null,
-  "return_pickup_point": null
+  "payment": null
 }
 ```
 
@@ -984,12 +1014,15 @@ Request: `{ "is_active": false }`. Response `200`.
   "return_boarding_count": 2,
   "last_boarded_at": "2026-09-15T16:40:00Z",
   "duration_days": 7,
-  "max_qr_usages": 14,
+  "days_per_week": 4,
+  "usage_days_this_week": 3,
+  "remaining_usage_days_this_week": 1,
   "used_qr_usages": 4,
-  "remaining_qr_usages": 10,
   "qr_usages_today": 1
 }
 ```
+
+> `usage_days_this_week` and `remaining_usage_days_this_week` are DAYS, not scans: one calendar day with outbound + return scans counts as ONE usage day (Mon–Sun, UTC week). `used_qr_usages` / `qr_usages_today` are raw scan counters.
 
 `SubscriptionQRResponse`:
 
@@ -997,8 +1030,6 @@ Request: `{ "is_active": false }`. Response `200`.
 {
   "subscription_id": 88,
   "plan_type": "WEEKLY",
-  "route_id": 10,
-  "route_name": "Campus Express",
   "valid_from": "2026-09-14",
   "valid_until": "2026-09-20",
   "qr_payload": "ra7al://subscription/<opaque-token>",
@@ -1010,16 +1041,12 @@ Request: `{ "is_active": false }`. Response `200`.
 Convenience list of **active** plans (same shape as `SubscriptionPlanResponse`), **not paginated** — a plain array. Intended for the student plan-selection screen.
 
 ### `POST /subscriptions` — STUDENT
-Purchase a plan for a route. Request (`SubscriptionCreateRequest`):
+Purchase a plan. The ENTIRE request (`SubscriptionCreateRequest`):
 
 ```json
 {
-  "route_id": 10,
   "plan_id": 5,
   "start_date": "2026-09-14",
-  "outbound_pickup_point_id": 9,
-  "return_pickup_mode": "DIFFERENT",
-  "return_pickup_point_id": 12,
   "payment_method": "VODAFONE_CASH",
   "transaction_reference": "VC-123456789"
 }
@@ -1027,29 +1054,26 @@ Purchase a plan for a route. Request (`SubscriptionCreateRequest`):
 
 | Field | Required | Notes |
 |---|---|---|
-| `route_id` | ✓ | must be an **active** route |
 | `plan_id` | ✓ | must be an **active** plan |
-| `start_date` | optional | defaults to today (UTC); cannot be in the past. `service_date` is an accepted alias; both must match if both sent |
-| `outbound_pickup_point_id` | ✓ | pickup point must belong to the chosen route (points are per-trip). Get valid values from `pickup_points` in `GET /reservations/available-trips` for that route |
-| `return_pickup_mode` | optional | `SAME_AS_OUTBOUND` (default) or `DIFFERENT` |
-| `return_pickup_point_id` | conditional | required when mode = `DIFFERENT`; must belong to the route |
-| `payment_method` | optional | default `CASH` |
-| `transaction_reference` | optional | ≤ 100 chars; with a digital method → payment starts SUBMITTED |
+| `start_date` | optional | defaults to today (UTC); cannot be in the past |
+| `payment_method` | optional | `CASH` (default) \| `VODAFONE_CASH` \| `INSTAPAY` |
+| `transaction_reference` | conditional | ≤ 100 chars; **REQUIRED for `VODAFONE_CASH`/`INSTAPAY`** (`422` if missing); tolerated-but-optional for `CASH` |
 
 Server behavior:
 - `end_date = start_date + plan.duration_days - 1` (inclusive).
-- Rejects overlap with an existing PENDING/ACTIVE subscription for the same student+route (`409`).
-- Creates the subscription with `status: "PENDING"` and an auto-created payment record (plan price snapshot).
+- Plan `duration_days` and `days_per_week` are **snapshotted** onto the subscription (`*_snapshot` fields) — later CEO plan edits never change this subscription.
+- Rejects any overlap with an existing PENDING/ACTIVE subscription for the student (`409`).
+- Creates the subscription with `status: "PENDING"` and an auto-created payment record (plan price snapshot); digital methods start `SUBMITTED` (reference provided upfront), `CASH` starts `PENDING`.
 - Generates the QR token server-side (opaque; hashed in DB).
 
 Response `201`: `SubscriptionResponse`.
-Errors: `403` (non-student), `404` (route/plan/pickup point), `409` (overlapping subscription), `422`.
+Errors: `403` (non-student), `404` (plan), `409` (overlapping subscription), `422` (inactive plan, past start date, missing digital reference).
 
 ### `GET /subscriptions/my` — STUDENT
-Query: `page`, `page_size`, `status`, `route_id`. Response `200`: `PaginatedSubscriptionResponse` (items are `SubscriptionDetailResponse`).
+Query: `page`, `page_size`, `status`. Response `200`: `PaginatedSubscriptionResponse` (items are `SubscriptionDetailResponse`).
 
 ### `GET /subscriptions` — CEO
-Query: `page`, `page_size`, `student_id`, `university_id`, `route_id`, `plan_type`, `status`, `start_date_from`, `start_date_to`, `end_date_from`, `end_date_to`. Response `200`: `PaginatedSubscriptionResponse`.
+Query: `page`, `page_size`, `student_id`, `university_id`, `route_id` (legacy rows only), `plan_type`, `status`, `start_date_from`, `start_date_to`, `end_date_from`, `end_date_to`. Response `200`: `PaginatedSubscriptionResponse`.
 
 ### `GET /subscriptions/{subscription_id}` — CEO / assigned supervisor / owner student
 Response `200`: `SubscriptionDetailResponse` (with QR usage accounting). Auto-expires: if `end_date` has passed and status was ACTIVE, the response shows `EXPIRED`. Errors: `403`, `404`.
@@ -1106,34 +1130,31 @@ Response `200`: `SubscriptionResponse` (`status: "CANCELLED"`). Errors: `403`, `
     "academic_year": "3rd Year"
   },
   "subscription_id": 88,
-  "plan_type": "WEEKLY",
   "route_id": 10,
   "direction": "OUTBOUND",
   "pickup_point_id": 9,
-  "boarded_at": "2026-09-15T07:35:00Z"
+  "boarded_at": "2026-09-15T07:35:00Z",
+  "usage_days_this_week": 3,
+  "remaining_usage_days_this_week": 1
 }
 ```
 
-`SupervisorTripStudentResponse`:
+`SupervisorTripStudentResponse` (students who selected the trip for its service date):
 
 ```json
 {
   "student_id": 42,
   "student_name": "Ahmed Ali",
   "subscription_id": 88,
-  "subscription_type": "WEEKLY",
   "subscription_status": "ACTIVE",
-  "start_date": "2026-09-14",
-  "end_date": "2026-09-20",
+  "service_date": "2026-09-15",
+  "direction_mode": "BOTH",
   "payment_status": "VERIFIED",
   "outbound_pickup": "Cairo University Gate 3",
   "return_pickup": "Main Gate",
-  "boarding_count": 4,
-  "outbound_boarding_count": 2,
-  "return_boarding_count": 2,
   "outbound_boarded": true,
   "return_boarded": false,
-  "last_boarded_at": "2026-09-16T07:35:00Z"
+  "last_boarded_at": "2026-09-15T07:35:00Z"
 }
 ```
 
@@ -1173,12 +1194,15 @@ Request (`BoardingScanRequest`):
 - `qr_token` 1–512 chars. The `ra7al://subscription/` prefix is optional (the raw token also works).
 - Trip must be `SCHEDULED` or `IN_PROGRESS` (`422` for CANCELLED/COMPLETED).
 - Scanner must be the trip's assigned supervisor (`403`).
+- Boarding is real-time: only on the trip's own service date (`422` otherwise).
+- A confirmed DAILY reservation matching the student/subscription/trip/direction/pickup point is REQUIRED (`422` otherwise).
+- Weekly rule: at most `days_per_week` DISTINCT usage days per week (Mon–Sun, UTC); outbound + return on the same day = ONE usage day; at most 2 scans per day; duplicates rejected `409`.
 - Full validation order and all error states: [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
 
 Response `200`: `BoardingResponse`.
 
 ### `GET /boarding/trips/{trip_id}/students` — CEO or assigned supervisor
-Students subscribed to the trip's route with per-trip attendance flags. Response `200`: array of `SupervisorTripStudentResponse`. Errors: `403`, `404`.
+Students who selected this trip for the trip's service date, with per-trip attendance flags. Response `200`: array of `SupervisorTripStudentResponse`. Errors: `403`, `404`.
 
 ### `GET /boarding/trips/{trip_id}/records` — CEO or assigned supervisor
 All boarding records for the trip. Response `200`: array of `BoardingRecordResponse`. Errors: `403`, `404`.

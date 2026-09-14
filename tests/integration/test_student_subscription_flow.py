@@ -1,11 +1,13 @@
 """Integration tests for the student subscription flow ("اشترك الآن").
 
-Covers the end-to-end authorization contract required by the subscription UI:
+Covers the decoupled authorization contract required by the subscription UI:
 
-- STUDENT can READ routes (needed to pick a route when subscribing).
+- STUDENT can read routes (needed later for DAILY transportation selection).
 - STUDENT cannot create/update/delete routes or stops (management blocked).
 - STUDENT can read the available subscription plans.
-- STUDENT can create a valid subscription end-to-end.
+- STUDENT can subscribe with ONLY plan + start date + payment method
+  (NO route, NO trip, NO pickup point fields exist on the request).
+- Digital payment methods require a transaction reference; cash does not.
 - Invalid subscription requests remain rejected with useful error codes.
 """
 from datetime import datetime, timedelta, timezone
@@ -100,6 +102,7 @@ def _setup_subscription_fixtures(session: Session) -> dict:
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("600.00"),
         is_active=True,
     )
@@ -107,6 +110,7 @@ def _setup_subscription_fixtures(session: Session) -> dict:
         name="Weekly Pass",
         plan_type=SubscriptionPlanType.WEEKLY,
         duration_days=7,
+        days_per_week=4,
         price=Decimal("180.00"),
         is_active=True,
     )
@@ -122,10 +126,10 @@ def _setup_subscription_fixtures(session: Session) -> dict:
     }
 
 
-def test_student_can_read_routes_for_subscription(
+def test_student_can_read_routes_for_daily_selection(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """STUDENT must be able to list routes: the subscription UI needs them to pick a route."""
+    """STUDENT must be able to list routes: the daily-selection UI needs them to browse trips."""
     fixtures = _setup_subscription_fixtures(db_session)
     _, student_token = _create_user_and_token(db_session, "stu_read_routes@ra7al.edu", RoleEnum.STUDENT)
     headers = {"Authorization": f"Bearer {student_token}"}
@@ -193,6 +197,9 @@ def test_student_can_access_subscription_plans(
     plan_types = {p["plan_type"] for p in res.json()}
     assert "MONTHLY" in plan_types
     assert "WEEKLY" in plan_types
+    # Plans expose the CEO-defined weekly usage-day allowance
+    for plan in res.json():
+        assert 1 <= plan["days_per_week"] <= 7
 
     res_all = client_with_db.get("/api/v1/subscription-plans", headers=headers)
     assert res_all.status_code == 200
@@ -201,33 +208,23 @@ def test_student_can_access_subscription_plans(
 def test_student_full_subscription_flow_end_to_end(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Simulate the complete 'اشترك الآن' journey: load routes -> pick route -> load plans -> subscribe."""
+    """Subscribe with ONLY plan + start date + payment — no route/trip/pickup fields."""
     fixtures = _setup_subscription_fixtures(db_session)
     student, student_token = _create_user_and_token(db_session, "stu_e2e@ra7al.edu", RoleEnum.STUDENT)
     headers = {"Authorization": f"Bearer {student_token}"}
 
-    # 1. Load routes (previously failed with 403 for students)
-    routes_res = client_with_db.get("/api/v1/routes", headers=headers)
-    assert routes_res.status_code == 200
-    route_id = next(
-        item["id"] for item in routes_res.json()["items"] if item["id"] == fixtures["route"].id
-    )
-
-    # 2. Load available plans
+    # 1. Load available plans (no route selection happens during subscribe)
     plans_res = client_with_db.get("/api/v1/subscriptions/plans", headers=headers)
     assert plans_res.status_code == 200
     plan_id = next(
         p["id"] for p in plans_res.json() if p["id"] == fixtures["plan_monthly"].id
     )
 
-    # 3. Create the subscription on the selected route and plan
+    # 2. Create the subscription: plan + start date + cash payment ONLY
     start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
     payload = {
-        "route_id": route_id,
         "plan_id": plan_id,
         "start_date": start_date,
-        "outbound_pickup_point_id": fixtures["pickup"].id,
-        "return_pickup_mode": "SAME_AS_OUTBOUND",
         "payment_method": "CASH",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)
@@ -235,13 +232,53 @@ def test_student_full_subscription_flow_end_to_end(
     data = res.json()
 
     assert data["student_id"] == student.id
-    assert data["route_id"] == route_id
     assert data["plan_id"] == plan_id
     assert float(data["price_snapshot"]) == 600.0  # price snapshot from the plan
     assert data["status"] == "PENDING"
+    # No route/trip/pickup coupling in the response
+    assert data.get("route_id") is None
+    assert data.get("outbound_pickup_point_id") is None
+    assert data.get("return_pickup_point_id") is None
+    # Inclusive-date validity: start + duration - 1
     assert data["end_date"] == (
         datetime.fromisoformat(start_date).date() + timedelta(days=29)
     ).isoformat()
+
+
+def test_student_digital_payment_requires_reference(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Digital methods require a transaction reference; cash must not."""
+    fixtures = _setup_subscription_fixtures(db_session)
+    _, student_token = _create_user_and_token(db_session, "stu_digital@ra7al.edu", RoleEnum.STUDENT)
+    headers = {"Authorization": f"Bearer {student_token}"}
+
+    start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+
+    # Vodafone Cash without reference -> 422
+    res_no_ref = client_with_db.post(
+        "/api/v1/subscriptions",
+        json={
+            "plan_id": fixtures["plan_weekly"].id,
+            "start_date": start_date,
+            "payment_method": "VODAFONE_CASH",
+        },
+        headers=headers,
+    )
+    assert res_no_ref.status_code == 422
+
+    # With reference -> 201
+    res_ok = client_with_db.post(
+        "/api/v1/subscriptions",
+        json={
+            "plan_id": fixtures["plan_weekly"].id,
+            "start_date": start_date,
+            "payment_method": "VODAFONE_CASH",
+            "transaction_reference": "VF-778899",
+        },
+        headers=headers,
+    )
+    assert res_ok.status_code == 201, res_ok.text
 
 
 def test_student_invalid_subscription_still_rejected(
@@ -251,43 +288,30 @@ def test_student_invalid_subscription_still_rejected(
     fixtures = _setup_subscription_fixtures(db_session)
     _, student_token = _create_user_and_token(db_session, "stu_invalid@ra7al.edu", RoleEnum.STUDENT)
     headers = {"Authorization": f"Bearer {student_token}"}
-    route_id = fixtures["route"].id
-
-    # Unknown route -> 404
-    res_bad_route = client_with_db.post(
-        "/api/v1/subscriptions",
-        json={
-            "route_id": 999999,
-            "plan_id": fixtures["plan_monthly"].id,
-            "outbound_pickup_point_id": fixtures["pickup"].id,
-        },
-        headers=headers,
-    )
-    assert res_bad_route.status_code == 404
 
     # Unknown plan -> 404
     res_bad_plan = client_with_db.post(
         "/api/v1/subscriptions",
         json={
-            "route_id": route_id,
             "plan_id": 999999,
-            "outbound_pickup_point_id": fixtures["pickup"].id,
+            "start_date": (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat(),
+            "payment_method": "CASH",
         },
         headers=headers,
     )
     assert res_bad_plan.status_code == 404
 
-    # Pickup point from another route -> 422
-    res_bad_pickup = client_with_db.post(
+    # Past start date -> 422
+    res_past = client_with_db.post(
         "/api/v1/subscriptions",
         json={
-            "route_id": route_id,
             "plan_id": fixtures["plan_monthly"].id,
-            "outbound_pickup_point_id": 999999,
+            "start_date": (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat(),
+            "payment_method": "CASH",
         },
         headers=headers,
     )
-    assert res_bad_pickup.status_code == 404 or res_bad_pickup.status_code == 422
+    assert res_past.status_code == 422
 
     # Malformed payload (missing required fields) -> 422
     res_malformed = client_with_db.post("/api/v1/subscriptions", json={}, headers=headers)
@@ -298,9 +322,9 @@ def test_student_invalid_subscription_still_rejected(
     res_ceo = client_with_db.post(
         "/api/v1/subscriptions",
         json={
-            "route_id": route_id,
             "plan_id": fixtures["plan_monthly"].id,
-            "outbound_pickup_point_id": fixtures["pickup"].id,
+            "start_date": (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat(),
+            "payment_method": "CASH",
         },
         headers={"Authorization": f"Bearer {ceo_token}"},
     )

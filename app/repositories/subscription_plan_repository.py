@@ -31,12 +31,14 @@ class SubscriptionPlanRepository:
         plan_type: SubscriptionPlanType,
         name: str,
         duration_days: int,
+        days_per_week: int,
     ) -> SubscriptionPlan | None:
-        """Fetch an exact package duplicate by type, name, and duration."""
+        """Fetch an exact package duplicate by type, name, duration, and weekly allowance."""
         stmt = select(SubscriptionPlan).where(
             SubscriptionPlan.plan_type == plan_type,
             SubscriptionPlan.name == name.strip(),
             SubscriptionPlan.duration_days == duration_days,
+            SubscriptionPlan.days_per_week == days_per_week,
         )
         return self.db.execute(stmt).scalars().first()
 
@@ -82,6 +84,7 @@ class SubscriptionPlanRepository:
         name: str,
         plan_type: SubscriptionPlanType,
         duration_days: int,
+        days_per_week: int,
         price: Decimal,
         currency: str = "EGP",
         is_active: bool = True,
@@ -91,6 +94,7 @@ class SubscriptionPlanRepository:
             name=name.strip(),
             plan_type=plan_type,
             duration_days=duration_days,
+            days_per_week=days_per_week,
             price=price,
             currency=currency,
             is_active=is_active,
@@ -107,6 +111,7 @@ class SubscriptionPlanRepository:
         price: Decimal | None = None,
         is_active: bool | None = None,
         duration_days: int | None = None,
+        days_per_week: int | None = None,
     ) -> SubscriptionPlan:
         """Update an existing subscription plan."""
         if name is not None:
@@ -117,6 +122,8 @@ class SubscriptionPlanRepository:
             plan.is_active = is_active
         if duration_days is not None:
             plan.duration_days = duration_days
+        if days_per_week is not None:
+            plan.days_per_week = days_per_week
 
         self.db.commit()
         self.db.refresh(plan)

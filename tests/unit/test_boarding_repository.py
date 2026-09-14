@@ -8,7 +8,6 @@ from app.models.enums import (
     BoardingDirection,
     BusStatus,
     GenderEnum,
-    ReturnPickupMode,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
@@ -70,6 +69,7 @@ def test_boarding_repository_crud_and_counts(db_session: Session) -> None:
         name="Monthly Pass",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
+        days_per_week=4,
         price=Decimal("750.00"),
     )
     db_session.add_all([route, plan])
@@ -95,15 +95,13 @@ def test_boarding_repository_crud_and_counts(db_session: Session) -> None:
 
     sub = Subscription(
         student_id=student.id,
-        route_id=route.id,
         plan_id=plan.id,
         price_snapshot=Decimal("750.00"),
+        duration_days_snapshot=30,
+        days_per_week_snapshot=4,
         currency="EGP",
         start_date=now_utc.date(),
-        end_date=now_utc.date(),
-        outbound_pickup_point_id=pickup.id,
-        return_pickup_point_id=pickup.id,
-        return_pickup_mode=ReturnPickupMode.SAME_AS_OUTBOUND,
+        end_date=now_utc.date() + timedelta(days=29),
         qr_token_hash="token_hash_abc",
         status=SubscriptionStatus.ACTIVE,
     )

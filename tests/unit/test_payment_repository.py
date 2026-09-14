@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import uuid
 import pytest
 from sqlalchemy.orm import Session
@@ -21,6 +22,43 @@ from app.models.station import Station
 from app.models.trip import Trip
 from app.models.user import User
 from app.repositories.payment_repository import PaymentRepository
+
+
+def _setup_subscription(session: Session, student_id: int):
+    """Create a minimal ACTIVE subscription so the reservation FK is satisfied."""
+    import secrets
+
+    from app.models.subscription import Subscription
+    from app.models.subscription_plan import SubscriptionPlan
+    from app.models.enums import SubscriptionPlanType, SubscriptionStatus
+    plan = SubscriptionPlan(
+        name="Pay Plan",
+        plan_type=SubscriptionPlanType.MONTHLY,
+        duration_days=30,
+        days_per_week=4,
+        price=Decimal("500.00"),
+        is_active=True,
+    )
+    session.add(plan)
+    session.commit()
+
+    raw = secrets.token_urlsafe(16)
+    subscription = Subscription(
+        student_id=student_id,
+        plan_id=plan.id,
+        price_snapshot=plan.price,
+        duration_days_snapshot=plan.duration_days,
+        days_per_week_snapshot=plan.days_per_week,
+        start_date=datetime.now(timezone.utc).date(),
+        end_date=datetime.now(timezone.utc).date() + timedelta(days=29),
+        qr_token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        qr_token=raw,
+        status=SubscriptionStatus.ACTIVE,
+    )
+    session.add(subscription)
+    session.commit()
+    session.refresh(subscription)
+    return subscription
 
 
 def _setup_entities(
@@ -88,6 +126,8 @@ def _setup_entities(
     reservation = Reservation(
         trip_id=trip.id,
         student_id=student.id,
+        subscription_id=_setup_subscription(session, student.id).id,
+        service_date=trip.departure_time.date() + timedelta(days=0),
         status=ReservationStatus.CONFIRMED,
     )
     session.add(reservation)

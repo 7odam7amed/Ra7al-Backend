@@ -4,7 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.enums import (
     BoardingDirection,
     PaymentStatus,
-    SubscriptionPlanType,
     SubscriptionStatus,
 )
 
@@ -51,29 +50,27 @@ class BoardingResponse(BaseModel):
     message: str = "Boarding verified successfully"
     student: BoardingStudentSummary
     subscription_id: int
-    plan_type: SubscriptionPlanType
     route_id: int
     direction: BoardingDirection
     pickup_point_id: int
     boarded_at: datetime
+    # Weekly usage accounting after this scan (days, not scans).
+    usage_days_this_week: int | None = None
+    remaining_usage_days_this_week: int | None = None
 
 
 class SupervisorTripStudentResponse(BaseModel):
-    """Summary of a subscribed student for a supervisor's assigned trip."""
+    """Summary of a student's daily selection for a supervisor's assigned trip."""
 
     student_id: int
     student_name: str
     subscription_id: int
-    subscription_type: SubscriptionPlanType
     subscription_status: SubscriptionStatus
-    start_date: date
-    end_date: date
+    service_date: date
+    direction_mode: str = "BOTH"
     payment_status: PaymentStatus | None = None
     outbound_pickup: str | None = None
     return_pickup: str | None = None
-    boarding_count: int = 0
-    outbound_boarding_count: int = 0
-    return_boarding_count: int = 0
     outbound_boarded: bool = False
     return_boarded: bool = False
     last_boarded_at: datetime | None = None

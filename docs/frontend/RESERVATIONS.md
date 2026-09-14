@@ -1,6 +1,8 @@
-# Reservations
+# Reservations — Daily Transportation Selection
 
-Seat booking on scheduled trips, verified against `app/api/v1/reservations.py`, `app/services/reservation_service.py`, and the `Reservation` model.
+The DAILY selection workflow, verified against `app/api/v1/reservations.py`, `app/services/reservation_service.py`, the `Reservation` model, and `app/utils/dates.py`.
+
+> **CORE CONCEPT (v2 contract):** A reservation is the student's DAILY transportation choice: **trip + outbound pickup point + return pickup point for TOMORROW**. It requires an ACTIVE subscription but is otherwise independent of it — the subscription answers "which plan did the student buy?", the reservation answers "how does the student travel on a given day?".
 
 ---
 
@@ -11,44 +13,71 @@ Seat booking on scheduled trips, verified against `app/api/v1/reservations.py`, 
   "id": 101,
   "trip_id": 55,
   "student_id": 42,
+  "subscription_id": 88,
+  "service_date": "2026-09-15",
+  "outbound_pickup_point_id": 9,
+  "return_pickup_point_id": 12,
+  "direction_mode": "BOTH",
   "status": "CONFIRMED",
-  "booked_at": "2026-09-10T12:00:00Z",
+  "booked_at": "2026-09-14T12:00:00Z",
   "cancelled_at": null,
   "created_at": "…",
   "updated_at": "…",
   "trip": { "…": "TripResponse" },
-  "student": { "…": "UserResponse" }
+  "student": { "…": "UserResponse" },
+  "outbound_pickup_point": { "…": "PickupPointResponse" },
+  "return_pickup_point": { "…": "PickupPointResponse" }
 }
 ```
 
 | Field | Notes |
 |---|---|
-| `trip_id` | The scheduled trip. |
-| `student_id` | Owner. |
+| `trip_id` | The scheduled trip departing on `service_date`. |
+| `student_id` | Owner (derived from the JWT, never from the request). |
+| `subscription_id` | The ACTIVE subscription authorizing this selection. |
+| `service_date` | The calendar transportation date — always TOMORROW for API-created selections. |
+| `outbound_pickup_point_id` / `return_pickup_point_id` | Selected gathering points; belong to the trip. Null only for one-way `direction_mode`s. |
+| `direction_mode` | `BOTH`, `OUTBOUND_ONLY`, or `RETURN_ONLY`. |
 | `status` | `CONFIRMED` or `CANCELLED` only. |
-| `booked_at` / `cancelled_at` | Timestamps. |
 
-## 2. Booking — `POST /api/v1/reservations` (STUDENT)
+## 2. Creating Tomorrow's Selection — `POST /api/v1/reservations` (STUDENT)
 
-Request: `{ "trip_id": 55 }` — nothing else; the student is taken from the token.
+```json
+{
+  "trip_id": 55,
+  "outbound_pickup_point_id": 9,
+  "return_pickup_point_id": 12,
+  "direction_mode": "BOTH"
+}
+```
 
-Server rules (exact):
+- `direction_mode` defaults to `BOTH`, which **requires both** pickup point IDs (`422` otherwise). `OUTBOUND_ONLY` requires `outbound_pickup_point_id`; `RETURN_ONLY` requires `return_pickup_point_id`.
+- There is **no `date` field**: the service date is derived server-side as TOMORROW (Today → Tomorrow window). Clients cannot select today, past dates, or arbitrary future dates.
+
+Server rules (exact, in order):
 
 1. Student must exist, be active, role STUDENT (`403`/`422`/`404` otherwise).
-2. Trip must exist and be `SCHEDULED` (`422` for IN_PROGRESS/COMPLETED/CANCELLED).
-3. Departure must be in the future (`422` `"Trip has already departed"`).
-4. **No duplicate:** the student must not already hold a CONFIRMED reservation on this trip (`409` `"Student already has an active confirmed reservation for this trip"`). This is DB-enforced by a partial unique index.
-5. **Capacity:** confirmed reservations must be below `trip.passenger_capacity` (`409` `"No available seats for this trip"`). The trip row is locked during the check, so concurrent bookings cannot overbook.
+2. **An ACTIVE subscription covering the service date is mandatory** (`422` "An ACTIVE subscription covering the service date is required…"). PENDING is not usable — payment must be verified first.
+3. Trip must exist (`404`), be `SCHEDULED` (`422` otherwise), and depart on the service date (tomorrow) (`422` "Selected trip does not operate on the requested service date").
+4. **Pickup-point validation (server-side, never trusted):** each supplied point must belong to the selected trip — and therefore to the trip's route (`422` "…does not belong to trip X"). A pickup point from another route is ALWAYS rejected.
+5. **No duplicate day selection:** the student must not already hold a CONFIRMED reservation for the service date (`409` "Student already has an active daily selection for the requested date; cancel it before creating a new one"). DB-enforced by a partial unique index on (student, service_date) where status = CONFIRMED.
+6. **Capacity:** confirmed reservations must be below `trip.passenger_capacity` (`409` "No available seats for this trip"). The trip row is locked during the check, so concurrent bookings cannot overbook.
 
-Response `201` with `status: "CONFIRMED"`.
+Response `201` with `status: "CONFIRMED"` and `service_date` = tomorrow.
 
-> **Overbooking is impossible** via the API — capacity is strictly enforced. There is no waitlist or overbooking behavior to document.
+## 3. Updating & Fetching Tomorrow's Selection
 
-## 3. Browsing Bookable Trips — `GET /api/v1/reservations/available-trips`
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/reservations/my/tomorrow` | `GET` | Fetch the student's selection for tomorrow (`404` if none). |
+| `/api/v1/reservations/my/tomorrow` | `PUT` | Replace tomorrow's selection in place (same body as POST). Validates trip/pickups/capacity again; `404` if no existing selection. |
+| `/api/v1/reservations/my` | `GET` | Paginated history of the student's selections. |
+
+## 4. Browsing Selectable Trips — `GET /api/v1/reservations/available-trips`
 
 Any authenticated role. Query: `page`, `page_size`, `route_id` (optional).
 
-Returns future `SCHEDULED` trips with remaining capacity:
+Returns trips departing **tomorrow** with remaining capacity:
 
 ```json
 {
@@ -74,32 +103,37 @@ Returns future `SCHEDULED` trips with remaining capacity:
 }
 ```
 
+### FLOW B (daily transportation) — recommended UI sequence
+
+1. Student must already hold an ACTIVE subscription (check via `GET /subscriptions/my`).
+2. `GET /reservations/available-trips` → render tomorrow's trips with `available_seats`.
+3. Student picks a trip → use that trip's embedded `pickup_points` to render the outbound and return point pickers (ordered by `sequence`).
+4. Student picks outbound + return pickup point → `POST /reservations` (or `PUT /reservations/my/tomorrow` to change an existing selection).
+5. On the travel day the supervisor scans the student's QR ([QR_AND_BOARDING.md](QR_AND_BOARDING.md)) — boarding REQUIRES this selection to exist and to match the scanned trip/point.
+
 Use `available_seats` to render seat availability; hide/disable booking when `0` (the server would reject anyway).
 
-### Pickup points in the response
-
-Each item embeds the trip's `pickup_points` (array of `PickupPointResponse`, ordered by `sequence`, `[]` when the trip has none). **Students use these `id` values as `outbound_pickup_point_id` when purchasing a subscription** ([SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)) — no privileged endpoint needed. At boarding time the scanned pickup point must match the student's configured point and belong to the scanned trip ([QR_AND_BOARDING.md](QR_AND_BOARDING.md)).
-
-## 4. Cancellation — `PATCH /api/v1/reservations/{reservation_id}/cancel`
+## 5. Cancellation — `PATCH /api/v1/reservations/{reservation_id}/cancel`
 
 - Allowed: owner student, CEO, or any supervisor.
 - Only non-cancelled reservations (`422` `"Reservation is already cancelled"`).
-- Effect: `status → CANCELLED`, `cancelled_at` stamped. The seat is released (capacity is computed from CONFIRMED reservations only).
+- Effect: `status → CANCELLED`, `cancelled_at` stamped. The seat is released (capacity is computed from CONFIRMED reservations only) and the student may create a new selection for the same date.
 
-## 5. Listing
+## 6. Listing
 
 | Endpoint | Roles | Filters |
 |---|---|---|
-| `GET /reservations/my` | STUDENT | `page`, `page_size`, `status`, `trip_id` |
-| `GET /reservations` | CEO, SUPERVISOR | `page`, `page_size`, `trip_id`, `student_id`, `status`, `booked_after`, `booked_before` |
+| `GET /reservations/my` | STUDENT | `page`, `page_size`, `status`, `trip_id`, `service_date_from`, `service_date_to` |
+| `GET /reservations` | CEO, SUPERVISOR | `page`, `page_size`, `trip_id`, `student_id`, `status`, `service_date_from`, `service_date_to`, `booked_after`, `booked_before` |
 | `GET /reservations/{id}` | CEO, SUPERVISOR, owner student | — |
 
-## 6. Direction, Pickup Points & the Subscription Relationship
+## 7. Relationship to Subscription & Boarding
 
-- A reservation has **no direction and no pickup point of its own**. It books a seat on one trip.
-- Pickup points and outbound/return direction belong to the **subscription** (configured at purchase) and are validated at **boarding** time, not at reservation time.
-- **Reservation state and boarding:** boarding scans validate the student's *subscription* (route, dates, status, usage allowance) and the *trip/direction/pickup* — a reservation is **not** required to board. Conversely, holding a CONFIRMED reservation on a trip using a bus is what grants a student access to that **bus image**. See [QR_AND_BOARDING.md](QR_AND_BOARDING.md) and [BUSES.md](BUSES.md).
+- **A reservation does NOT modify the subscription.** Creating/updating/cancelling a selection never changes plan, dates, snapshots, or status of the subscription.
+- **Boarding REQUIRES a reservation:** a QR scan is only valid if a CONFIRMED selection exists for the trip's service date, belongs to the scanned student's subscription, covers the scan direction, and names the scanned pickup point. See [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
+- One usage DAY allows one outbound scan + one return scan; together they count as ONE weekly usage day (see the weekly rule in [QR_AND_BOARDING.md](QR_AND_BOARDING.md)).
+- Holding a CONFIRMED reservation on a trip using a bus grants the student access to that **bus image** ([BUSES.md](BUSES.md)).
 
-## 7. Payments
+## 8. Payments
 
 A reservation can have at most one active payment (`PENDING`/`SUBMITTED`/`VERIFIED`). The payment amount comes from `trip.fare_amount`. Flow: [PAYMENTS.md](PAYMENTS.md).

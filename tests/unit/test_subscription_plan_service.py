@@ -45,6 +45,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
                 name="Monthly Pass",
                 plan_type=SubscriptionPlanType.MONTHLY,
                 duration_days=30,
+                days_per_week=4,
                 price=Decimal("750.00"),
             ),
         )
@@ -57,6 +58,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
                 name="Free Pass",
                 plan_type=SubscriptionPlanType.MONTHLY,
                 duration_days=30,
+                days_per_week=4,
                 price=Decimal("0.00"),
             ),
         )
@@ -68,6 +70,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             name="Daily Ticket",
             plan_type=SubscriptionPlanType.DAILY,
             duration_days=1,
+            days_per_week=1,
             price=Decimal("40.00"),
         ),
     )
@@ -80,6 +83,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             name="Monthly Pass",
             plan_type=SubscriptionPlanType.MONTHLY,
             duration_days=30,
+            days_per_week=4,
             price=Decimal("800.00"),
         ),
     )
@@ -92,6 +96,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             name="Monthly Extended",
             plan_type=SubscriptionPlanType.MONTHLY,
             duration_days=45,
+            days_per_week=5,
             price=Decimal("1000.00"),
         ),
     )
@@ -104,6 +109,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             name="Weekly Pass",
             plan_type=SubscriptionPlanType.WEEKLY,
             duration_days=7,
+            days_per_week=7,
             price=Decimal("150.00"),
         ),
     )
@@ -115,6 +121,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
             name="Term Pass",
             plan_type=SubscriptionPlanType.TERM,
             duration_days=120,
+            days_per_week=5,
             price=Decimal("2100.00"),
         ),
     )
@@ -130,6 +137,7 @@ def test_subscription_plan_service_rbac_and_validations(db_session) -> None:
                 name="Weekly Pass",
                 plan_type=SubscriptionPlanType.WEEKLY,
                 duration_days=7,
+                days_per_week=7,
                 price=Decimal("999.00"),
             ),
         )

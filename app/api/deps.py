@@ -219,12 +219,16 @@ def get_trip_service(
 
 def get_reservation_service(
     reservation_repo: ReservationRepository = Depends(get_reservation_repository),
+    subscription_repo: SubscriptionRepository = Depends(
+        get_subscription_repository
+    ),
     trip_repo: TripRepository = Depends(get_trip_repository),
     user_repo: UserRepository = Depends(get_user_repository),
 ) -> ReservationService:
     """Dependency returning a ReservationService instance."""
     return ReservationService(
         reservation_repo=reservation_repo,
+        subscription_repo=subscription_repo,
         trip_repo=trip_repo,
         user_repo=user_repo,
     )
@@ -265,10 +269,6 @@ def get_subscription_service(
     plan_repo: SubscriptionPlanRepository = Depends(
         get_subscription_plan_repository
     ),
-    route_repo: RouteRepository = Depends(get_route_repository),
-    pickup_point_repo: PickupPointRepository = Depends(
-        get_pickup_point_repository
-    ),
     trip_repo: TripRepository = Depends(get_trip_repository),
     user_repo: UserRepository = Depends(get_user_repository),
     payment_repo: PaymentRepository = Depends(get_payment_repository),
@@ -278,8 +278,6 @@ def get_subscription_service(
     return SubscriptionService(
         subscription_repo=subscription_repo,
         plan_repo=plan_repo,
-        route_repo=route_repo,
-        pickup_point_repo=pickup_point_repo,
         trip_repo=trip_repo,
         user_repo=user_repo,
         payment_repo=payment_repo,
@@ -296,6 +294,7 @@ def get_boarding_service(
     pickup_point_repo: PickupPointRepository = Depends(
         get_pickup_point_repository
     ),
+    reservation_repo: ReservationRepository = Depends(get_reservation_repository),
 ) -> BoardingService:
     """Dependency returning a BoardingService instance."""
     return BoardingService(
@@ -303,6 +302,7 @@ def get_boarding_service(
         subscription_repo=subscription_repo,
         trip_repo=trip_repo,
         pickup_point_repo=pickup_point_repo,
+        reservation_repo=reservation_repo,
     )
 
 

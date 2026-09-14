@@ -4,7 +4,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.enums import (
-    ReturnPickupMode,
     SubscriptionPlanType,
     SubscriptionStatus,
 )
@@ -14,7 +13,7 @@ from app.models.user import User
 
 
 class SubscriptionRepository:
-    """Repository handling database operations for student route subscriptions."""
+    """Repository handling database operations for student transit subscriptions."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -30,11 +29,8 @@ class SubscriptionRepository:
             select(Subscription)
             .options(
                 joinedload(Subscription.student),
-                joinedload(Subscription.route),
                 joinedload(Subscription.plan),
                 joinedload(Subscription.payment),
-                joinedload(Subscription.outbound_pickup_point),
-                joinedload(Subscription.return_pickup_point),
             )
             .where(Subscription.id == subscription_id)
         )
@@ -46,30 +42,45 @@ class SubscriptionRepository:
             select(Subscription)
             .options(
                 joinedload(Subscription.student),
-                joinedload(Subscription.route),
                 joinedload(Subscription.plan),
                 joinedload(Subscription.payment),
-                joinedload(Subscription.outbound_pickup_point),
-                joinedload(Subscription.return_pickup_point),
             )
             .where(Subscription.qr_token_hash == qr_token_hash)
+        )
+        return self.db.execute(stmt).scalars().first()
+
+    def get_active_for_student_on_date(
+        self, student_id: int, service_date: date
+    ) -> Subscription | None:
+        """Fetch the student's ACTIVE subscription valid on a specific date.
+
+        Requires status ACTIVE (PENDING is not usable) and the service date to
+        fall inside the inclusive validity window.
+        """
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.student_id == student_id,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+                Subscription.start_date <= service_date,
+                Subscription.end_date >= service_date,
+            )
+            .order_by(Subscription.id.desc())
         )
         return self.db.execute(stmt).scalars().first()
 
     def find_overlapping_active_subscription(
         self,
         student_id: int,
-        route_id: int,
         start_date: date,
         end_date: date,
         exclude_id: int | None = None,
     ) -> Subscription | None:
-        """Check if an active subscription exists for student and route overlapping the date range."""
+        """Check if an active subscription exists for the student overlapping the date range."""
         stmt = (
             select(Subscription)
             .where(
                 Subscription.student_id == student_id,
-                Subscription.route_id == route_id,
                 Subscription.status.in_(
                     [SubscriptionStatus.ACTIVE, SubscriptionStatus.PENDING]
                 ),
@@ -104,11 +115,8 @@ class SubscriptionRepository:
             self.db.execute(
                 stmt.options(
                     joinedload(Subscription.student),
-                    joinedload(Subscription.route),
                     joinedload(Subscription.plan),
                     joinedload(Subscription.payment),
-                    joinedload(Subscription.outbound_pickup_point),
-                    joinedload(Subscription.return_pickup_point),
                 )
                 .order_by(Subscription.id.desc())
                 .offset(offset)
@@ -167,11 +175,8 @@ class SubscriptionRepository:
             self.db.execute(
                 stmt.options(
                     joinedload(Subscription.student),
-                    joinedload(Subscription.route),
                     joinedload(Subscription.plan),
                     joinedload(Subscription.payment),
-                    joinedload(Subscription.outbound_pickup_point),
-                    joinedload(Subscription.return_pickup_point),
                 )
                 .order_by(Subscription.id.desc())
                 .offset(offset)
@@ -185,56 +190,61 @@ class SubscriptionRepository:
     def list_active_for_route_on_date(
         self, route_id: int, service_date: date
     ) -> list[Subscription]:
-        """Retrieve active subscriptions for a given route valid on a specific date."""
+        """Retrieve active subscriptions usable on a specific date.
+
+        Route-awareness is a legacy filter (pre-refactor subscriptions may
+        carry a route_id); a NULL route_id subscription still counts as active
+        on any date within its validity window, so supervisors see students
+        who selected that route for the day via their reservations.
+        """
         stmt = (
             select(Subscription)
             .options(
                 joinedload(Subscription.student),
-                joinedload(Subscription.route),
                 joinedload(Subscription.plan),
                 joinedload(Subscription.payment),
-                joinedload(Subscription.outbound_pickup_point),
-                joinedload(Subscription.return_pickup_point),
             )
             .where(
-                Subscription.route_id == route_id,
                 Subscription.status == SubscriptionStatus.ACTIVE,
                 Subscription.start_date <= service_date,
                 Subscription.end_date >= service_date,
             )
             .order_by(Subscription.id.asc())
         )
+        if route_id is not None:
+            stmt = stmt.where(
+                (Subscription.route_id == route_id)
+                | (Subscription.route_id.is_(None))
+            )
         return list(self.db.execute(stmt).scalars().all())
 
     def create(
         self,
         student_id: int,
-        route_id: int,
         plan_id: int,
         price_snapshot: Decimal,
+        duration_days_snapshot: int,
+        days_per_week_snapshot: int,
         start_date: date,
         end_date: date,
-        outbound_pickup_point_id: int,
-        return_pickup_point_id: int,
-        return_pickup_mode: ReturnPickupMode,
         qr_token_hash: str,
         qr_token: str | None = None,
         currency: str = "EGP",
+        route_id: int | None = None,
         payment_id: int | None = None,
         status: SubscriptionStatus = SubscriptionStatus.PENDING,
     ) -> Subscription:
-        """Persist a new subscription."""
+        """Persist a new subscription (plan purchase only — no route/pickups)."""
         sub = Subscription(
             student_id=student_id,
             route_id=route_id,
             plan_id=plan_id,
             price_snapshot=price_snapshot,
             currency=currency,
+            duration_days_snapshot=duration_days_snapshot,
+            days_per_week_snapshot=days_per_week_snapshot,
             start_date=start_date,
             end_date=end_date,
-            outbound_pickup_point_id=outbound_pickup_point_id,
-            return_pickup_point_id=return_pickup_point_id,
-            return_pickup_mode=return_pickup_mode,
             qr_token_hash=qr_token_hash,
             qr_token=qr_token,
             payment_id=payment_id,

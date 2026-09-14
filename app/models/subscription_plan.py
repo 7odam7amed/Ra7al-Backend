@@ -11,6 +11,9 @@ from app.models.enums import SubscriptionPlanType
 # Prevents accidental absurd values; the CEO enters the duration freely within this bound.
 MAX_PLAN_DURATION_DAYS = 730
 
+# Upper bound for CEO-defined weekly usage days (a week has 7 days).
+MAX_PLAN_DAYS_PER_WEEK = 7
+
 if TYPE_CHECKING:
     from app.models.subscription import Subscription
 
@@ -32,6 +35,14 @@ class SubscriptionPlan(BaseModel):
             "(plan_type IN ('WEEKLY', 'MONTHLY', 'TERM'))",
             name="chk_subscription_plan_canonical_duration",
         ),
+        CheckConstraint(
+            "days_per_week > 0",
+            name="chk_subscription_plan_days_per_week_positive",
+        ),
+        CheckConstraint(
+            f"days_per_week <= {MAX_PLAN_DAYS_PER_WEEK}",
+            name="chk_subscription_plan_days_per_week_max",
+        ),
     )
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -46,6 +57,10 @@ class SubscriptionPlan(BaseModel):
         nullable=False,
     )
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Maximum number of DISTINCT usage days the student may consume per
+    # calendar week (Mon-Sun, UTC). Outbound + return QR scans on the same
+    # calendar day count as ONE usage day. NOT the number of QR scans.
+    days_per_week: Mapped[int] = mapped_column(Integer, nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     currency: Mapped[str] = mapped_column(
         String(3),

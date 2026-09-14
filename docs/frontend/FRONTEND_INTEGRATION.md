@@ -119,10 +119,12 @@ busImage.src = URL.createObjectURL(img.data);
 ## 8. Fetch Routes (students too)
 
 ```js
-// Any authenticated user; students get read-only access (subscription flow needs this)
+// Any authenticated user; students get read-only access (browsing the network)
 const routes = await api.get("/api/v1/routes", { params: { is_active: true, page: 1, page_size: 50 } });
 // routes.data.items[] → id, route_number, name, origin_station, destination_station, stops[]
 ```
+
+> Routes are NOT part of subscription purchase. The subscription is plan + start date + payment only.
 
 ## 9. Create a Subscription (student)
 
@@ -130,26 +132,17 @@ const routes = await api.get("/api/v1/routes", { params: { is_active: true, page
 // 1. Plans for purchase screen (plain array, active only)
 const plans = await api.get("/api/v1/subscriptions/plans");
 
-// 2. Pickup points for the chosen route (points are per-trip)
-//    They come embedded in the student-accessible available-trips response —
-//    no privileged endpoint needed:
-//
-//      GET /reservations/available-trips?route_id=10
-//      → items[].pickup_points = [{ id: 9, name: "Cairo University Gate 3", sequence: 1, ... }]
-//
-//    Let the student pick a trip, then pick one of that trip's pickup_points.
-//    The backend rejects (422) any outbound_pickup_point_id that is not on the chosen route.
-
-// 3. Purchase
+// 2. Purchase — plan + start date + payment ONLY.
+//    NO route_id, trip_id, or pickup points here: daily transportation is
+//    selected separately through the reservation workflow (RESERVATIONS.md).
 const sub = await api.post("/api/v1/subscriptions", {
-  route_id: 10,
   plan_id: 5,
-  outbound_pickup_point_id: 9,
-  return_pickup_mode: "SAME_AS_OUTBOUND",   // or DIFFERENT + return_pickup_point_id
-  payment_method: "VODAFONE_CASH",
-  transaction_reference: "VC-123456789",    // optional; → payment starts SUBMITTED
+  start_date: "2026-09-14",                // optional; defaults to today
+  payment_method: "VODAFONE_CASH",          // or INSTAPAY / CASH
+  transaction_reference: "VC-123456789",    // REQUIRED for VODAFONE_CASH/INSTAPAY; omit for CASH
 });
 // sub.data.status === "PENDING" until an admin verifies the payment
+// sub.data exposes the purchase snapshots: price_snapshot, duration_days_snapshot, days_per_week_snapshot
 ```
 
 ## 10. Display Subscription Status & Usage
@@ -157,20 +150,21 @@ const sub = await api.post("/api/v1/subscriptions", {
 ```js
 const sub = await api.get(`/api/v1/subscriptions/${id}`);
 // sub.data: { status, payment_status, start_date, end_date,
-//             duration_days, max_qr_usages, used_qr_usages,
-//             remaining_qr_usages, qr_usages_today, ... }
+//             duration_days, days_per_week,
+//             usage_days_this_week, remaining_usage_days_this_week,
+//             used_qr_usages, qr_usages_today, ... }
 ```
 
 UI recipe:
 
 ```
-Status:        sub.status (+ payment_status while PENDING)
-Validity:      sub.start_date → sub.end_date
-QR remaining:  {remaining_qr_usages} / {max_qr_usages}
-Used today:    {qr_usages_today} / 2
+Status:            sub.status (+ payment_status while PENDING)
+Validity:          sub.start_date → sub.end_date
+Weekly usage:      {usage_days_this_week} / {days_per_week} DAYS this week
+Used today:        {qr_usages_today} / 2 scans
 ```
 
-Never compute allowances client-side — the fields above are the contract. Details: [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
+Never compute allowances client-side — the fields above are the contract. `usage_days_this_week` counts DISTINCT calendar DAYS with any scan (outbound + return same day = ONE usage day); `used_qr_usages` / `qr_usages_today` are raw scan counters. Details: [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
 
 ## 11. Show the QR (student)
 
@@ -194,12 +188,12 @@ const scan = await api.post("/api/v1/boarding/scan", {
 // 422 → daily limit / allowance exhausted / subscription invalid / wrong pickup
 ```
 
-## 13. Handle the Daily QR Limit & Exhausted Allowance
+## 13. Handle the Daily Scan Limit & Exhausted Weekly Allowance
 
 | Signal | Action |
 |---|---|
-| `qr_usages_today >= 2` (or scan 422 "Daily QR usage limit reached…") | "Daily limit reached — scans resume tomorrow." Keep roster flags visible. |
-| `remaining_qr_usages === 0` (or scan 422 "QR usage allowance exhausted…") | "Allowance used up." Offer `PATCH /api/v1/subscriptions/{id}/renew`. |
+| `qr_usages_today >= 2` (or scan 422 "Daily QR limit reached…") | "Daily limit reached — scans resume tomorrow." Keep roster flags visible. |
+| `remaining_usage_days_this_week === 0` (or scan 422 "Weekly usage limit reached…") | "Weekly allowance used up." It resets automatically at the start of the next week (Mon–Sun, UTC); no rollover. Offer renewal if the week has days left the student needs. |
 | Scan 409 ("already boarded … for this trip") | Mark the direction boarded; don't retry. |
 
 After any successful scan, refetch the subscription to refresh counters.
