@@ -155,6 +155,7 @@ Minimal request:
 
 Key server-side behaviors:
 - Route and plan must be active; the outbound pickup point must belong to the chosen route (pickup points are per-trip → the frontend should let the student pick a trip's points; error `422` if the point isn't on the route).
+- **Where students get valid values:** `GET /reservations/available-trips` embeds each trip's `pickup_points` (ordered by `sequence`) — pick a trip, then one of its points as `outbound_pickup_point_id`. No privileged endpoint needed.
 - `return_pickup_mode`: `SAME_AS_OUTBOUND` (default) reuses the outbound point; `DIFFERENT` requires `return_pickup_point_id` (also on the route).
 - **Price is snapshotted** from the plan; the amount is server-calculated (client cannot set it).
 - A payment record is auto-created: digital methods (VODAFONE_CASH/INSTAPAY) with a `transaction_reference` start as `SUBMITTED`; otherwise `PENDING`.

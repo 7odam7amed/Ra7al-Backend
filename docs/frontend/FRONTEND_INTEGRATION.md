@@ -130,12 +130,15 @@ const routes = await api.get("/api/v1/routes", { params: { is_active: true, page
 // 1. Plans for purchase screen (plain array, active only)
 const plans = await api.get("/api/v1/subscriptions/plans");
 
-// 2. Pick a trip's pickup points for the chosen route (points are per-trip)
-//    (discover trips via GET /reservations/available-trips?route_id=… or CEO-provided info,
-//     then GET /trips/{id}/pickup-points — note: students cannot call GET /trips;
-//     pickup point selection UI must rely on data provided through available plans/routes flows
-//     or an admin-provided list. UNKNOWN / VERIFY WITH BACKEND if the student flow needs
-//     direct pickup-point discovery.)
+// 2. Pickup points for the chosen route (points are per-trip)
+//    They come embedded in the student-accessible available-trips response —
+//    no privileged endpoint needed:
+//
+//      GET /reservations/available-trips?route_id=10
+//      → items[].pickup_points = [{ id: 9, name: "Cairo University Gate 3", sequence: 1, ... }]
+//
+//    Let the student pick a trip, then pick one of that trip's pickup_points.
+//    The backend rejects (422) any outbound_pickup_point_id that is not on the chosen route.
 
 // 3. Purchase
 const sub = await api.post("/api/v1/subscriptions", {

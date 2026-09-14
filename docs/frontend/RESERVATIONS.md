@@ -66,11 +66,19 @@ Returns future `SCHEDULED` trips with remaining capacity:
   "created_at": "…",
   "updated_at": "…",
   "route": { "…": "RouteResponse" },
-  "bus": { "…": "BusResponse" }
+  "bus": { "…": "BusResponse" },
+  "pickup_points": [
+    { "id": 9, "trip_id": 55, "name": "Cairo University Gate 3", "address": "Giza, University St.", "sequence": 1, "created_at": "…", "updated_at": "…" },
+    { "id": 12, "trip_id": 55, "name": "Main Gate", "address": null, "sequence": 2, "created_at": "…", "updated_at": "…" }
+  ]
 }
 ```
 
 Use `available_seats` to render seat availability; hide/disable booking when `0` (the server would reject anyway).
+
+### Pickup points in the response
+
+Each item embeds the trip's `pickup_points` (array of `PickupPointResponse`, ordered by `sequence`, `[]` when the trip has none). **Students use these `id` values as `outbound_pickup_point_id` when purchasing a subscription** ([SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)) — no privileged endpoint needed. At boarding time the scanned pickup point must match the student's configured point and belong to the scanned trip ([QR_AND_BOARDING.md](QR_AND_BOARDING.md)).
 
 ## 4. Cancellation — `PATCH /api/v1/reservations/{reservation_id}/cancel`
 

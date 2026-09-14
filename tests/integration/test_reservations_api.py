@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.security import create_access_token, hash_password
 from app.models.bus import Bus
 from app.models.enums import BusStatus, GenderEnum, ReservationStatus, RoleEnum, TripStatus
+from app.models.pickup_point import PickupPoint
 from app.models.route import Route
 from app.models.station import Station
 from app.models.trip import Trip
@@ -368,6 +369,132 @@ def test_ownership_enforcement(
     )
     assert res_cancel_sup.status_code == 200
     assert res_cancel_sup.json()["status"] == "CANCELLED"
+
+
+def test_available_trips_include_pickup_points_for_students(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Students get each trip's ordered pickup points in the available-trips response
+    so they can choose an outbound_pickup_point_id when subscribing."""
+    route, _, _, trip = _setup_api_prerequisites(db_session, capacity=5)
+
+    pp1 = PickupPoint(trip_id=trip.id, name="Gate 3", sequence=1)
+    pp2 = PickupPoint(trip_id=trip.id, name="Main Gate", sequence=2)
+    db_session.add_all([pp1, pp2])
+    db_session.commit()
+
+    _, std_token = _create_user_and_token(
+        db_session, "s_pickup@test.edu", RoleEnum.STUDENT
+    )
+    headers = {"Authorization": f"Bearer {std_token}"}
+
+    res = client_with_db.get(
+        f"/api/v1/reservations/available-trips?route_id={route.id}",
+        headers=headers,
+    )
+    assert res.status_code == 200
+    item = next(t for t in res.json()["items"] if t["id"] == trip.id)
+
+    # Points belong to this trip and are ordered by sequence
+    assert [p["id"] for p in item["pickup_points"]] == [pp1.id, pp2.id]
+    assert [p["sequence"] for p in item["pickup_points"]] == [1, 2]
+    assert item["pickup_points"][0]["name"] == "Gate 3"
+    assert item["pickup_points"][0]["trip_id"] == trip.id
+
+
+def test_available_trips_empty_pickup_points_is_list_not_null(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """A trip without pickup points exposes an empty list, never null."""
+    route, _, _, trip = _setup_api_prerequisites(db_session)
+    _, std_token = _create_user_and_token(
+        db_session, "s_no_pickup@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        f"/api/v1/reservations/available-trips?route_id={route.id}",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res.status_code == 200
+    item = next(t for t in res.json()["items"] if t["id"] == trip.id)
+    assert item["pickup_points"] == []
+
+
+def test_available_trips_pickup_points_feed_subscription_purchase(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """End-to-end: student picks a point from available-trips and subscribes;
+    a point from an unrelated trip is rejected by the backend."""
+    from app.models.subscription_plan import SubscriptionPlan
+    from app.models.enums import SubscriptionPlanType
+    from decimal import Decimal
+
+    route, _, _, trip = _setup_api_prerequisites(db_session)
+
+    pp_valid = PickupPoint(trip_id=trip.id, name="Route A Gate", sequence=1)
+    db_session.add(pp_valid)
+    db_session.commit()
+
+    plan = SubscriptionPlan(
+        name=f"Daily-{datetime.now().microsecond}",
+        plan_type=SubscriptionPlanType.DAILY,
+        duration_days=1,
+        price=Decimal("45.00"),
+        is_active=True,
+    )
+    db_session.add(plan)
+    db_session.commit()
+
+    student, std_token = _create_user_and_token(
+        db_session, "s_purchase@test.edu", RoleEnum.STUDENT
+    )
+    headers = {"Authorization": f"Bearer {std_token}"}
+
+    # 1. Student discovers valid pickup points through the student-accessible flow
+    res_avail = client_with_db.get(
+        f"/api/v1/reservations/available-trips?route_id={route.id}",
+        headers=headers,
+    )
+    assert res_avail.status_code == 200
+    item = next(t for t in res_avail.json()["items"] if t["id"] == trip.id)
+    valid_point_ids = {p["id"] for p in item["pickup_points"]}
+    assert pp_valid.id in valid_point_ids
+
+    # 2. Valid point -> subscription created
+    res_ok = client_with_db.post(
+        "/api/v1/subscriptions",
+        json={
+            "route_id": route.id,
+            "plan_id": plan.id,
+            "outbound_pickup_point_id": pp_valid.id,
+            "return_pickup_mode": "SAME_AS_OUTBOUND",
+        },
+        headers=headers,
+    )
+    assert res_ok.status_code == 201
+    assert res_ok.json()["outbound_pickup_point_id"] == pp_valid.id
+
+    # 3. Point belonging to an unrelated trip -> rejected by backend validation
+    _, _, _, other_trip = _setup_api_prerequisites(db_session)
+    pp_unrelated = PickupPoint(trip_id=other_trip.id, name="Unrelated Gate", sequence=1)
+    db_session.add(pp_unrelated)
+    db_session.commit()
+
+    student2, std2_token = _create_user_and_token(
+        db_session, "s_purchase2@test.edu", RoleEnum.STUDENT
+    )
+    res_bad = client_with_db.post(
+        "/api/v1/subscriptions",
+        json={
+            "route_id": route.id,
+            "plan_id": plan.id,
+            "outbound_pickup_point_id": pp_unrelated.id,
+            "return_pickup_mode": "SAME_AS_OUTBOUND",
+        },
+        headers={"Authorization": f"Bearer {std2_token}"},
+    )
+    assert res_bad.status_code == 422
+    assert "does not belong to route" in res_bad.json()["detail"]
 
 
 def test_available_trips_api(

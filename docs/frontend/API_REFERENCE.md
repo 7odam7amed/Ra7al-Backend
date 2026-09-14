@@ -771,9 +771,15 @@ Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `422`.
   "created_at": "...",
   "updated_at": "...",
   "route": { "...": "RouteResponse" },
-  "bus": { "...": "BusResponse" }
+  "bus": { "...": "BusResponse" },
+  "pickup_points": [
+    { "id": 9, "trip_id": 55, "name": "Cairo University Gate 3", "address": "Giza, University St.", "sequence": 1, "created_at": "...", "updated_at": "..." },
+    { "id": 12, "trip_id": 55, "name": "Main Gate", "address": null, "sequence": 2, "created_at": "...", "updated_at": "..." }
+  ]
 }
 ```
+
+`pickup_points` lists the trip's gathering points ordered by `sequence` (empty list if the trip has none). Use these `id` values as `outbound_pickup_point_id` when purchasing a subscription.
 
 ### `POST /reservations` — STUDENT
 Request: `{ "trip_id": 55 }`.
@@ -783,7 +789,9 @@ Errors: `403` (non-student), `404`, `409`, `422`.
 
 ### `GET /reservations/available-trips` — any authenticated
 Query: `page`, `page_size`, `route_id` (optional).
-Returns future `SCHEDULED` trips with `available_seats > 0`. Response `200`: `PaginatedAvailableTripResponse`.
+Returns future `SCHEDULED` trips with `available_seats > 0`, each including the trip's ordered `pickup_points`. Response `200`: `PaginatedAvailableTripResponse`.
+
+> Students obtain valid `outbound_pickup_point_id` values from `pickup_points` in this response — no privileged endpoint required.
 
 ### `GET /reservations/my` — STUDENT
 Query: `page`, `page_size`, `status` (ReservationStatus), `trip_id`. Response `200`: `PaginatedReservationResponse`.
@@ -1022,7 +1030,7 @@ Purchase a plan for a route. Request (`SubscriptionCreateRequest`):
 | `route_id` | ✓ | must be an **active** route |
 | `plan_id` | ✓ | must be an **active** plan |
 | `start_date` | optional | defaults to today (UTC); cannot be in the past. `service_date` is an accepted alias; both must match if both sent |
-| `outbound_pickup_point_id` | ✓ | pickup point must belong to the chosen route (points are per-trip) |
+| `outbound_pickup_point_id` | ✓ | pickup point must belong to the chosen route (points are per-trip). Get valid values from `pickup_points` in `GET /reservations/available-trips` for that route |
 | `return_pickup_mode` | optional | `SAME_AS_OUTBOUND` (default) or `DIFFERENT` |
 | `return_pickup_point_id` | conditional | required when mode = `DIFFERENT`; must belong to the route |
 | `payment_method` | optional | default `CASH` |

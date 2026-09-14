@@ -45,6 +45,11 @@ The Alembic chain (`alembic/versions/`) confirms this evolution:
 - Exposed usage fields on subscription payloads: `duration_days`, `max_qr_usages`, `used_qr_usages`, `remaining_qr_usages`, `qr_usages_today`.
 - Duplicate scans (same subscription + trip + direction) are rejected with `409`; concurrent scans are serialized via a DB row lock so limits cannot be exceeded.
 
+### Pickup points in available trips
+- `GET /reservations/available-trips` now embeds each trip's `pickup_points` (array of `PickupPointResponse`, ordered by `sequence`, `[]` when the trip has none).
+- Additive change: all pre-existing fields, endpoint paths, and role requirements are unchanged.
+- Students obtain valid `outbound_pickup_point_id` values for `POST /subscriptions` directly from this student-accessible response — `GET /trips/{id}/pickup-points` remains CEO/SUPERVISOR-only (unchanged).
+
 ### Other current-state notes
 - Payment system supports reservations **and** subscriptions; verifying a subscription payment activates the subscription (`PENDING → ACTIVE`).
 - Rate limiting is active on login/register (5/min), ID-card upload (10/min), bus image uploads (20/min), and boarding scans (60/min) — `429` + `Retry-After`.

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ReservationStatus, TripStatus
 from app.schemas.bus import BusResponse
+from app.schemas.pickup_point import PickupPointResponse
 from app.schemas.route import RouteResponse
 from app.schemas.trip import TripResponse
 from app.schemas.user import UserResponse
@@ -84,6 +85,9 @@ class AvailableTripResponse(BaseModel):
     updated_at: datetime
     route: RouteResponse | None = None
     bus: BusResponse | None = None
+    # Gathering/pickup points configured for this trip (ordered by sequence).
+    # Exposed so students can choose an outbound_pickup_point_id when subscribing.
+    pickup_points: list[PickupPointResponse] = []
 
 
 class PaginatedAvailableTripResponse(BaseModel):

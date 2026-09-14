@@ -41,25 +41,30 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
 8. GET  /api/v1/subscriptions/plans                   → active plans array
    ← [ { "id": 5, "name": "Weekly Standard", "plan_type": "WEEKLY",
          "duration_days": 7, "price": "120.00", "currency": "EGP", ... } ]
-9. POST /api/v1/subscriptions
+9. GET  /api/v1/reservations/available-trips?route_id=10   (any authenticated role)
+   ← items[] with departure times, available_seats and each trip's
+     "pickup_points": [ { "id": 9, "name": "Cairo University Gate 3", "sequence": 1, ... } ]
+   → let the student select a trip, then one of that trip's pickup_points
+10. POST /api/v1/subscriptions
    { "route_id": 10, "plan_id": 5,
-     "outbound_pickup_point_id": 9,
+     "outbound_pickup_point_id": 9,        // ← an id taken from step 9's pickup_points
      "return_pickup_mode": "SAME_AS_OUTBOUND",
      "payment_method": "VODAFONE_CASH",
      "transaction_reference": "VC-123456789" }
    ← 201 { "id": 88, "status": "PENDING", "price_snapshot": "120.00",
            "start_date": "2026-09-14", "end_date": "2026-09-20", ... }
+   // A pickup point not on the chosen route → 422
    // Admin verifies the payment → subscription becomes ACTIVE
 ```
 
 ### View Subscription & QR
 
 ```
-10. GET /api/v1/subscriptions/88
+11. GET /api/v1/subscriptions/88
    ← 200 { "status": "ACTIVE", "payment_status": "VERIFIED",
            "duration_days": 7, "max_qr_usages": 14, "used_qr_usages": 0,
            "remaining_qr_usages": 14, "qr_usages_today": 0, ... }
-11. GET /api/v1/subscriptions/88/qr
+12. GET /api/v1/subscriptions/88/qr
    ← 200 { "qr_payload": "ra7al://subscription/Xk9fQ2s...", "valid_from": "2026-09-14",
            "valid_until": "2026-09-20", "status": "ACTIVE", ... }
    → render qr_payload as QR image
@@ -68,7 +73,7 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
 ### Outbound Boarding (supervisor scans)
 
 ```
-12. Supervisor: POST /api/v1/boarding/scan
+13. Supervisor: POST /api/v1/boarding/scan
     { "qr_token": "ra7al://subscription/Xk9fQ2s...", "trip_id": 55,
       "direction": "OUTBOUND", "pickup_point_id": 9 }
     ← 200 { "success": true, "message": "Boarding verified successfully",
@@ -78,21 +83,21 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
 ### Return Boarding
 
 ```
-13. POST /api/v1/boarding/scan (same token, direction "RETURN", return pickup point)
+14. POST /api/v1/boarding/scan (same token, direction "RETURN", return pickup point)
     ← 200 BoardingResponse
 ```
 
 ### Daily Limit
 
 ```
-14. Third scan attempt the same calendar day (any trip/direction):
+15. Third scan attempt the same calendar day (any trip/direction):
     ← 422 { "detail": "Daily QR usage limit reached: at most 2 QR usages per day (one outbound and one return)" }
 ```
 
 ### Remaining Allowance
 
 ```
-15. GET /api/v1/subscriptions/88
+16. GET /api/v1/subscriptions/88
     ← "used_qr_usages": 2, "remaining_qr_usages": 12, "qr_usages_today": 2
     → UI: "QR remaining: 12 / 14" · "Used today: 2 / 2"
     // Unused calendar days never consume allowance; refetch after each scan.
@@ -101,8 +106,8 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
 ### Renewal / Expiry
 
 ```
-16. After end_date: GET /subscriptions/88 → status "EXPIRED" (auto-set)
-17. PATCH /api/v1/subscriptions/88/renew
+17. After end_date: GET /subscriptions/88 → status "EXPIRED" (auto-set)
+18. PATCH /api/v1/subscriptions/88/renew
     ← 201 new subscription { "status": "PENDING", "start_date": "2026-09-21", "end_date": "2026-09-27" }
 ```
 

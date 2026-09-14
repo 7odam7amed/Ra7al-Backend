@@ -113,6 +113,7 @@ Per-trip gathering locations where students board and supervisors scan.
 
 - `name` 1–255 chars (required), `address` ≤ 255 optional, `sequence` ≥ 1 (ordering; not enforced unique server-side).
 - Students select their outbound (and optionally return) pickup point **from a trip's pickup points** when subscribing; the scan endpoint validates that the scanned pickup point matches the student's configured one and belongs to the scanned trip ([QR_AND_BOARDING.md](QR_AND_BOARDING.md)).
+- **How students see a trip's points:** `GET /reservations/available-trips` embeds each available trip's `pickup_points` (student-accessible). The `GET /trips/{trip_id}/pickup-points` endpoint below remains a CEO/SUPERVISOR management view — students never need it.
 - Points can also be provided inline in `POST /trips` via the `pickup_points` array.
 
 ## 7. Frontend Flow Suggestion (CEO scheduler)

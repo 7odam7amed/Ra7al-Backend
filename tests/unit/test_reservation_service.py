@@ -10,6 +10,7 @@ from app.exceptions.base import (
 )
 from app.models.enums import GenderEnum, ReservationStatus, RoleEnum, TripStatus
 from app.models.reservation import Reservation
+from app.models.pickup_point import PickupPoint
 from app.models.trip import Trip
 from app.models.user import User
 from app.schemas.reservation import ReservationCreateRequest
@@ -290,6 +291,12 @@ def test_list_available_trips() -> None:
 
     trip1 = _create_mock_trip(1, TripStatus.SCHEDULED, capacity=10)
     trip2 = _create_mock_trip(2, TripStatus.SCHEDULED, capacity=5)
+    # Pickup points are eager-loaded by the trip repository and passed through
+    # to the available-trips response so students can select one.
+    trip1.pickup_points = [
+        PickupPoint(id=11, trip_id=1, name="Gate 3", sequence=1),
+        PickupPoint(id=12, trip_id=1, name="Main Gate", sequence=2),
+    ]
     trip_repo.list.return_value = ([trip1, trip2], 2)
 
     # trip1 has 3 confirmed (7 available)
@@ -307,3 +314,6 @@ def test_list_available_trips() -> None:
     assert items[0]["id"] == 1
     assert items[0]["available_seats"] == 7
     assert items[0]["confirmed_reservations_count"] == 3
+    # Trip 1 exposes its ordered pickup points; trip 2 (no points) is excluded anyway.
+    assert [p.id for p in items[0]["pickup_points"]] == [11, 12]
+    assert [p.sequence for p in items[0]["pickup_points"]] == [1, 2]

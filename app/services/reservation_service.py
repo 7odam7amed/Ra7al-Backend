@@ -227,6 +227,9 @@ class ReservationService:
 
                         "route": trip.route,
                         "bus": trip.bus,
+                        # Ordered pickup points are eager-loaded by the trip
+                        # repository, so this adds no extra queries (no N+1).
+                        "pickup_points": list(trip.pickup_points),
                     }
                 )
 
