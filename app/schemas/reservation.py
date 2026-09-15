@@ -1,30 +1,44 @@
 from datetime import date, datetime
-from decimal import Decimal
 import math
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ReservationStatus, TripStatus
+from app.models.enums import BoardingDirection, ReservationStatus, TripDirection, TripStatus
 from app.schemas.bus import BusResponse
 from app.schemas.pickup_point import PickupPointResponse
 from app.schemas.route import RouteResponse
 from app.schemas.trip import TripResponse
+from app.schemas.trip_stop import TripStopResponse
 from app.schemas.user import UserResponse
 
 
-class ReservationCreateRequest(BaseModel):
-    """Schema for creating/updating a DAILY transportation selection.
+class BookingState:
+    """Deterministic student-facing booking states for a trip."""
 
-    ``service_date`` is OPTIONAL and defaults to TOMORROW (Today -> Tomorrow
-    window) for backward compatibility. When supplied it must be a future
-    date (today or later); past dates are rejected server-side. The selected
-    date must fall inside the student's ACTIVE subscription validity window
-    and respect the subscription's ``days_per_week_snapshot`` weekly usage
-    limit — both enforced by the service layer, never trusted from the client.
+    AVAILABLE = "AVAILABLE"
+    BOOKED = "BOOKED"
+    FULL = "FULL"
+
+
+class ReservationCreateRequest(BaseModel):
+    """Create ONE directed booking for a service date.
+
+    ``service_date`` is OPTIONAL and defaults to TOMORROW. The selected point
+    must be one of the booked trip's stops. One OUTBOUND and one RETURN
+    booking are allowed per student per service date (enforced server-side).
     """
 
     trip_id: int = Field(
-        ..., gt=0, description="Scheduled trip ID departing on the service date", examples=[1]
+        ..., gt=0, description="Scheduled trip ID (single direction) departing on the service date", examples=[1]
+    )
+    selected_pickup_point_id: int = Field(
+        ...,
+        gt=0,
+        description=(
+            "The student's stop on this trip: pickup point for OUTBOUND, "
+            "drop-off point for RETURN (must be one of the trip's stops)"
+        ),
+        examples=[5],
     )
     service_date: date | None = Field(
         default=None,
@@ -33,49 +47,59 @@ class ReservationCreateRequest(BaseModel):
             "a future date within the subscription validity window). Defaults "
             "to TOMORROW when omitted."
         ),
-        examples=["2026-09-16"],
-    )
-    outbound_pickup_point_id: int | None = Field(
-        default=None,
-        gt=0,
-        description="Pickup point for the outbound journey (must belong to the trip)",
-        examples=[3],
-    )
-    return_pickup_point_id: int | None = Field(
-        default=None,
-        gt=0,
-        description="Pickup point for the return journey (must belong to the trip)",
-        examples=[4],
-    )
-    direction_mode: str = Field(
-        default="BOTH",
-        description="Which journeys are needed: BOTH, OUTBOUND_ONLY, or RETURN_ONLY",
+        examples=["2026-09-20"],
     )
 
-    @model_validator(mode="after")
-    def validate_direction_mode(self) -> "ReservationCreateRequest":
-        allowed = ("BOTH", "OUTBOUND_ONLY", "RETURN_ONLY")
-        if self.direction_mode not in allowed:
-            raise ValueError(f"direction_mode must be one of {', '.join(allowed)}")
-        if self.direction_mode == "BOTH":
-            if self.outbound_pickup_point_id is None or self.return_pickup_point_id is None:
-                raise ValueError(
-                    "Both outbound_pickup_point_id and return_pickup_point_id are required "
-                    "when direction_mode is BOTH"
-                )
-        elif self.direction_mode == "OUTBOUND_ONLY" and self.outbound_pickup_point_id is None:
-            raise ValueError(
-                "outbound_pickup_point_id is required when direction_mode is OUTBOUND_ONLY"
-            )
-        elif self.direction_mode == "RETURN_ONLY" and self.return_pickup_point_id is None:
-            raise ValueError(
-                "return_pickup_point_id is required when direction_mode is RETURN_ONLY"
-            )
-        return self
+
+class StudentTripViewResponse(BaseModel):
+    """Student-facing trip view with dynamic destination and booking state.
+
+    Destination logic (never stored on the trip):
+      - OUTBOUND: origin = selected pickup point, destination = the student's
+        registered university (per-student; two students on the same trip can
+        see different destinations).
+      - RETURN: origin = the student's university, destination = the drop-off
+        point the student selects when booking.
+    """
+
+    trip_id: int
+    direction: TripDirection
+    route: RouteResponse | None = None
+    origin: str | None = Field(
+        default=None,
+        description="OUTBOUND: selected pickup point name. RETURN: student's university name.",
+    )
+    destination: str | None = Field(
+        default=None,
+        description=(
+            "OUTBOUND: student's registered university name. "
+            "RETURN: the student's selected drop-off point name (null until booked)."
+        ),
+    )
+    selected_point_id: int | None = Field(
+        default=None,
+        description="The student's booked stop on this trip (null when not booked)",
+    )
+    estimated_arrival_time: datetime | None = None
+    booking_state: str = Field(
+        ..., description="AVAILABLE, BOOKED, or FULL"
+    )
+    departure_time: datetime | None = None
+    status: TripStatus
+    passenger_capacity: int
+    confirmed_reservations_count: int
+    available_seats: int
+    bus: BusResponse | None = None
+    stops: list[TripStopResponse] = Field(
+        default_factory=list,
+        description="Ordered selected stops with per-stop departure times",
+    )
+    # Ordered route points (student-facing selection list).
+    pickup_points: list[PickupPointResponse] = []
 
 
 class ReservationResponse(BaseModel):
-    """Public representation of a daily transportation selection."""
+    """Public representation of one directed booking (تم الحجز)."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -84,9 +108,9 @@ class ReservationResponse(BaseModel):
     student_id: int
     subscription_id: int
     service_date: date
-    outbound_pickup_point_id: int | None = None
-    return_pickup_point_id: int | None = None
-    direction_mode: str = "BOTH"
+    direction: BoardingDirection
+    selected_pickup_point_id: int
+    selected_pickup_point: PickupPointResponse | None = None
     status: ReservationStatus
     booked_at: datetime
     cancelled_at: datetime | None = None
@@ -94,8 +118,9 @@ class ReservationResponse(BaseModel):
     updated_at: datetime
     trip: TripResponse | None = None
     student: UserResponse | None = None
-    outbound_pickup_point: PickupPointResponse | None = None
-    return_pickup_point: PickupPointResponse | None = None
+    # Student-facing derived view (origin/destination per direction).
+    origin: str | None = None
+    destination: str | None = None
 
 
 class PaginatedReservationResponse(BaseModel):
@@ -125,36 +150,10 @@ class PaginatedReservationResponse(BaseModel):
         )
 
 
-class AvailableTripResponse(BaseModel):
-    """Representation of a trip available for TOMORROW's daily selection."""
+class PaginatedStudentTripViewResponse(BaseModel):
+    """Paginated list of student-facing upcoming trips (all eligible, not just tomorrow)."""
 
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    route_id: int
-    bus_id: int
-    supervisor_id: int
-    departure_time: datetime
-    estimated_arrival_time: datetime
-    status: TripStatus
-    passenger_capacity: int
-    confirmed_reservations_count: int
-    available_seats: int
-    fare_amount: Decimal = Decimal("50.00")
-    created_at: datetime
-    updated_at: datetime
-    route: RouteResponse | None = None
-    bus: BusResponse | None = None
-    # Gathering/pickup points configured for this trip (ordered by sequence).
-    # Exposed so students can choose outbound/return pickup point IDs for the
-    # daily selection.
-    pickup_points: list[PickupPointResponse] = []
-
-
-class PaginatedAvailableTripResponse(BaseModel):
-    """Paginated list of available trips."""
-
-    items: list[AvailableTripResponse]
+    items: list[StudentTripViewResponse]
     total: int
     page: int
     page_size: int
@@ -163,11 +162,11 @@ class PaginatedAvailableTripResponse(BaseModel):
     @classmethod
     def create(
         cls,
-        items: list[AvailableTripResponse],
+        items: list[StudentTripViewResponse],
         total: int,
         page: int,
         page_size: int,
-    ) -> "PaginatedAvailableTripResponse":
+    ) -> "PaginatedStudentTripViewResponse":
         total_pages = math.ceil(total / page_size) if total > 0 else 0
         return cls(
             items=items,

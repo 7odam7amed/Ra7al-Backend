@@ -7,10 +7,10 @@ from app.models.bus import Bus
 from app.models.enums import (
     BusStatus,
     GenderEnum,
-    ReturnPickupMode,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
 from app.models.pickup_point import PickupPoint
@@ -59,11 +59,6 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
 
     route = Route(
         name="Campus Line",
-        route_number="R-101",
-        origin_station_id=station_a.id,
-        destination_station_id=station_b.id,
-        distance_km=20.0,
-        estimated_duration_minutes=30,
         is_active=True,
     )
     plan = SubscriptionPlan(
@@ -80,19 +75,19 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
     now_utc = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now_utc,
         estimated_arrival_time=now_utc + timedelta(hours=1),
         passenger_capacity=30,
-        fare_amount=Decimal("50.00"),
         status=TripStatus.SCHEDULED,
     )
     db_session.add(trip)
     db_session.flush()
 
-    pickup_1 = PickupPoint(trip_id=trip.id, name="Gate 1", sequence=1)
-    pickup_2 = PickupPoint(trip_id=trip.id, name="Gate 2", sequence=2)
+    pickup_1 = PickupPoint(route_id=route.id, name="Gate 1", sequence=1)
+    pickup_2 = PickupPoint(route_id=route.id, name="Gate 2", sequence=2)
     db_session.add_all([pickup_1, pickup_2])
     db_session.commit()
 
@@ -121,8 +116,6 @@ def test_subscription_repository_crud_and_overlap(db_session: Session) -> None:
     assert sub.currency == "EGP"
     assert sub.status == SubscriptionStatus.PENDING
     assert sub.route_id is None
-    assert sub.outbound_pickup_point_id is None
-    assert sub.return_pickup_point_id is None
 
     # 2. Get by ID
     fetched = repo.get_by_id(sub.id, eager=True)

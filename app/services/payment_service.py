@@ -2,6 +2,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from fastapi import UploadFile
+
+from app.core.storage import storage_service
 from app.exceptions.base import (
     ConflictError,
     ForbiddenError,
@@ -29,6 +32,14 @@ from app.schemas.payment import (
 
 if TYPE_CHECKING:
     from app.repositories.subscription_repository import SubscriptionRepository
+
+# Storage namespace for digital payment receipt images (private bucket:
+# payment-receipts in production).
+PAYMENT_RECEIPTS_NAMESPACE = "payment_receipts"
+
+# Digital payment methods require BOTH a transaction/reference code and a
+# receipt image before CEO/SUPervisor verification can settle them.
+DIGITAL_PAYMENT_METHODS = (PaymentMethod.VODAFONE_CASH, PaymentMethod.INSTAPAY)
 
 
 class PaymentService:
@@ -81,73 +92,15 @@ class PaymentService:
         student_id: int,
         data: PaymentCreateRequest,
     ) -> Payment:
-        """Initiate a payment attempt for a student's reservation."""
-        # 1. Validate student
+        """Retired reservation-payment flow.
+
+        Trips no longer carry a price: transportation is covered by the
+        student's subscription. Reservation payments are rejected outright.
+        """
         self.validate_student(student_id)
-
-        # 2. Validate reservation existence and ownership
-        reservation = self.reservation_repo.get_by_id(data.reservation_id)
-        if reservation is None:
-            raise NotFoundError(
-                f"Reservation with ID {data.reservation_id} not found"
-            )
-
-        if reservation.student_id != student_id:
-            raise ForbiddenError(
-                "You cannot create a payment for another student's reservation"
-            )
-
-        # 3. Validate reservation status
-        if reservation.status != ReservationStatus.CONFIRMED:
-            raise ValidationError(
-                f"Cannot create payment for reservation with status '{reservation.status.value}'"
-            )
-
-        # 4. Check trip departure
-        trip = reservation.trip
-        if trip is None:
-            trip = self.trip_repo.get_by_id(reservation.trip_id)
-        if trip is None:
-            raise NotFoundError("Associated trip not found")
-
-        now_utc = datetime.now(timezone.utc)
-        dep_time = trip.departure_time
-        if dep_time.tzinfo is None:
-            dep_time = dep_time.replace(tzinfo=timezone.utc)
-        if dep_time <= now_utc:
-            raise ValidationError(
-                "Cannot create payment for a trip that has already departed"
-            )
-
-        # 5. Check for existing active payment on this reservation
-        active_payment = self.payment_repo.get_active_for_reservation_for_update(
-            data.reservation_id
-        )
-        if active_payment is not None:
-            raise ConflictError(
-                f"An active payment (status: {active_payment.status.value}) already exists for this reservation"
-            )
-
-        # 6. Determine server-side amount and initial status
-        amount = getattr(trip, "fare_amount", Decimal("50.00"))
-        initial_status = PaymentStatus.PENDING
-        paid_at: datetime | None = None
-
-        if data.method in (PaymentMethod.VODAFONE_CASH, PaymentMethod.INSTAPAY):
-            if data.transaction_reference and data.transaction_reference.strip():
-                initial_status = PaymentStatus.SUBMITTED
-                paid_at = now_utc
-
-        return self.payment_repo.create(
-            reservation_id=data.reservation_id,
-            student_id=student_id,
-            amount=amount,
-            currency="EGP",
-            method=data.method,
-            status=initial_status,
-            transaction_reference=data.transaction_reference,
-            notes=data.notes,
-            paid_at=paid_at,
+        raise ValidationError(
+            "Reservation payments are no longer used: transportation is covered "
+            "by the student's subscription"
         )
 
     def submit_payment(
@@ -173,13 +126,22 @@ class PaymentService:
             )
 
         ref = data.transaction_reference or payment.transaction_reference
-        if payment.method in (PaymentMethod.VODAFONE_CASH, PaymentMethod.INSTAPAY):
+        if payment.method in DIGITAL_PAYMENT_METHODS:
             if not ref or not ref.strip():
                 raise ValidationError(
                     f"Transaction reference is required when submitting a {payment.method.value} payment"
                 )
 
         now_utc = datetime.now(timezone.utc)
+        # Digital payments remain PENDING until the receipt image is uploaded;
+        # the SUBMITTED state is reached through upload_receipt().
+        if payment.method in DIGITAL_PAYMENT_METHODS and not payment.receipt_image_path:
+            return self.payment_repo.update_status(
+                payment=payment,
+                status=PaymentStatus.PENDING,
+                transaction_reference=ref,
+                notes=data.notes if data.notes is not None else payment.notes,
+            )
         return self.payment_repo.update_status(
             payment=payment,
             status=PaymentStatus.SUBMITTED,
@@ -187,6 +149,76 @@ class PaymentService:
             notes=data.notes if data.notes is not None else payment.notes,
             paid_at=now_utc,
         )
+
+    def upload_receipt(
+        self,
+        payment_id: int,
+        current_user: User,
+        file: UploadFile,
+    ) -> Payment:
+        """Attach a receipt image to the student's own digital payment.
+
+        The image is stored in the PRIVATE payment-receipts namespace. Only
+        the owning student may upload, only while the payment is PENDING, and
+        only for digital payment methods (cash has no receipt requirement).
+        Upload success advances a digital payment from PENDING to SUBMITTED.
+        """
+        payment = self.payment_repo.get_by_id(payment_id)
+        if payment is None:
+            raise NotFoundError(f"Payment with ID {payment_id} not found")
+
+        if current_user.role != RoleEnum.STUDENT:
+            raise ForbiddenError("Only the student owner can upload a payment receipt")
+        if payment.student_id != current_user.id:
+            raise ForbiddenError("You cannot upload a receipt for another student's payment")
+
+        if payment.method not in DIGITAL_PAYMENT_METHODS:
+            raise ValidationError(
+                "Receipt images are only required for digital payment methods"
+            )
+        if payment.status not in (PaymentStatus.PENDING, PaymentStatus.SUBMITTED):
+            raise ValidationError(
+                f"Cannot upload a receipt for a payment in status '{payment.status.value}'"
+            )
+
+        # Validate + store via the storage abstraction. delete_file() cleans up
+        # the stored object if the row update fails (no orphaned uploads).
+        try:
+            stored_path = storage_service.save_file(
+                file, namespace=PAYMENT_RECEIPTS_NAMESPACE
+            )
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError(f"Receipt upload failed: {exc}")
+
+        try:
+            updated = self.payment_repo.set_receipt_image(payment, stored_path)
+        except Exception:
+            storage_service.delete_file(stored_path)
+            raise
+
+        # Both receipt + reference present -> payment is ready for review.
+        if updated.transaction_reference and updated.transaction_reference.strip():
+            updated = self.payment_repo.update_status(
+                payment=updated,
+                status=PaymentStatus.SUBMITTED,
+                paid_at=updated.paid_at or datetime.now(timezone.utc),
+            )
+        return updated
+
+    def get_receipt(self, payment_id: int, current_user: User) -> tuple[bytes, str]:
+        """Stream a stored receipt image through an authorized backend flow.
+
+        Access: the owning student, or CEO/SUPERVISOR during payment review.
+        Objects never leave the private bucket via public URLs.
+        """
+        payment = self.get_payment_by_id(payment_id, current_user)
+
+        if not payment.receipt_image_path:
+            raise NotFoundError("No receipt image has been uploaded for this payment")
+
+        return storage_service.get_file(payment.receipt_image_path)
 
     def cancel_payment(
         self,
@@ -241,6 +273,18 @@ class PaymentService:
             raise ValidationError(
                 f"Cannot verify payment with terminal status '{payment.status.value}'"
             )
+
+        # Digital payments MUST carry BOTH the transaction/reference code and
+        # a stored receipt image before they can be settled.
+        if payment.method in DIGITAL_PAYMENT_METHODS:
+            if not payment.transaction_reference or not payment.transaction_reference.strip():
+                raise ValidationError(
+                    "Digital payment cannot be verified without a transaction reference"
+                )
+            if not payment.receipt_image_path:
+                raise ValidationError(
+                    "Digital payment cannot be verified without an uploaded receipt image"
+                )
 
         now_utc = datetime.now(timezone.utc)
         paid_at = payment.paid_at if payment.paid_at is not None else now_utc

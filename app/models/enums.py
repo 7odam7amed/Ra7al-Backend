@@ -49,6 +49,18 @@ class BusStatus(enum.StrEnum):
     MAINTENANCE = "MAINTENANCE"
 
 
+class TripDirection(enum.StrEnum):
+    """Direction of a scheduled trip, chosen explicitly by the CEO.
+
+    OUTBOUND (ذهاب): student's pickup point → the student's registered
+    university (per-student, never stored on the trip).
+    RETURN (عودة): the university → the student's selected drop-off point.
+    """
+
+    OUTBOUND = "OUTBOUND"
+    RETURN = "RETURN"
+
+
 class TripStatus(enum.StrEnum):
     """Operational status of a scheduled trip."""
 

@@ -30,26 +30,17 @@ from app.schemas.pickup_point import (
     PickupPointUpdateRequest,
 )
 from app.schemas.reservation import (
-    AvailableTripResponse,
-    PaginatedAvailableTripResponse,
     PaginatedReservationResponse,
     ReservationCreateRequest,
     ReservationResponse,
+    StudentTripViewResponse,
 )
 from app.schemas.route import (
     PaginatedRouteResponse,
     RouteCreateRequest,
     RouteResponse,
     RouteStatusUpdateRequest,
-    RouteSupervisorUpdateRequest,
     RouteUpdateRequest,
-)
-from app.schemas.route_stop import (
-    RouteStopCreateRequest,
-    RouteStopReorderItem,
-    RouteStopReorderRequest,
-    RouteStopResponse,
-    RouteStopUpdateRequest,
 )
 from app.schemas.station import (
     PaginatedStationResponse,
@@ -80,6 +71,11 @@ from app.schemas.trip import (
     TripStatusUpdateRequest,
     TripUpdateRequest,
 )
+from app.schemas.trip_stop import (
+    TripStopCreateRequest,
+    TripStopReorderItem,
+    TripStopResponse,
+)
 from app.schemas.university import (
     PaginatedUniversityResponse,
     UniversityCreateRequest,
@@ -97,7 +93,6 @@ from app.schemas.user import (
 )
 
 __all__ = [
-    "AvailableTripResponse",
     "BoardingRecordResponse",
     "BoardingResponse",
     "BoardingScanRequest",
@@ -109,7 +104,6 @@ __all__ = [
     "DatabaseHealthResponse",
     "HealthResponse",
     "LoginJSONRequest",
-    "PaginatedAvailableTripResponse",
     "PaginatedBoardingRecordResponse",
     "PaginatedBusResponse",
     "PaginatedPaymentResponse",
@@ -133,13 +127,8 @@ __all__ = [
     "RouteCreateRequest",
     "RouteResponse",
     "RouteStatusUpdateRequest",
-    "RouteStopCreateRequest",
-    "RouteStopReorderItem",
-    "RouteStopReorderRequest",
-    "RouteStopResponse",
-    "RouteStopUpdateRequest",
-    "RouteSupervisorUpdateRequest",
     "RouteUpdateRequest",
+    "StudentTripViewResponse",
     "StationCreateRequest",
     "StationResponse",
     "StationStatusUpdateRequest",
@@ -159,6 +148,9 @@ __all__ = [
     "TripCreateRequest",
     "TripResponse",
     "TripStatusUpdateRequest",
+    "TripStopCreateRequest",
+    "TripStopReorderItem",
+    "TripStopResponse",
     "TripUpdateRequest",
     "UniversityCreateRequest",
     "UniversityResponse",

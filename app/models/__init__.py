@@ -17,6 +17,7 @@ from app.models.enums import (
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
     TripStatusEnum,
     UserStatus,
@@ -26,11 +27,11 @@ from app.models.payment import Payment
 from app.models.pickup_point import PickupPoint
 from app.models.reservation import Reservation
 from app.models.route import Route
-from app.models.route_stop import RouteStop
 from app.models.station import Station
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 from app.models.university import University
 from app.models.user import User
 
@@ -53,15 +54,16 @@ __all__ = [
     "ReturnPickupMode",
     "RoleEnum",
     "Route",
-    "RouteStop",
     "Station",
     "Subscription",
     "SubscriptionPlan",
     "SubscriptionPlanType",
     "SubscriptionStatus",
     "Trip",
+    "TripDirection",
     "TripStatus",
     "TripStatusEnum",
+    "TripStop",
     "University",
     "User",
     "UserStatus",

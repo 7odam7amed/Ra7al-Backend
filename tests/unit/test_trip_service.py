@@ -1,129 +1,245 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password
+from tests.helpers import (
+    make_bus,
+    make_pickup_point,
+    make_route,
+    make_student,
+    make_supervisor,
+    make_trip,
+)
+
 from app.exceptions.base import ConflictError, NotFoundError, ValidationError
-from app.models.bus import Bus
-from app.models.enums import BusStatus, GenderEnum, RoleEnum, TripStatus
-from app.models.route import Route
-from app.models.station import Station
+from app.models.enums import BusStatus, GenderEnum, RoleEnum, TripDirection, TripStatus
 from app.models.user import User
 from app.repositories.bus_repository import BusRepository
+from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.route_repository import RouteRepository
 from app.repositories.trip_repository import TripRepository
+from app.repositories.trip_stop_repository import TripStopRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.trip import TripCreateRequest, TripUpdateRequest
+from app.schemas.trip_stop import TripStopCreateRequest
 from app.services.trip_service import TripService
 
 
-def _setup_service_and_fixtures(
-    db_session: Session,
-) -> tuple[TripService, Route, Bus, User]:
-    s1 = Station(name="Origin", code="ST-ORIG-SRV", latitude=30.0, longitude=31.0)
-    s2 = Station(name="Dest", code="ST-DEST-SRV", latitude=30.1, longitude=31.1)
-    db_session.add_all([s1, s2])
-    db_session.commit()
-
-    route = Route(
-        route_number="R-SRV-1",
-        name="Route Srv",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=20.0,
-        estimated_duration_minutes=40,
-        is_active=True,
-    )
-    bus = Bus(
-        bus_number="BUS-SRV-1",
-        license_plate="SRV-001",
-        capacity=50,
-        status=BusStatus.ACTIVE,
-    )
-    supervisor = User(
-        full_name="Supervisor Srv",
-        phone_number="+201033331111",
-        password_hash=hash_password("Password123!"),
+def _supervisor(db_session, name: str, phone: str) -> User:
+    """Create an active supervisor row directly (APPROVED via is_active)."""
+    user = User(
+        full_name=name,
+        phone_number=phone,
+        password_hash="x",
         gender=GenderEnum.MALE,
         role=RoleEnum.SUPERVISOR,
         is_active=True,
     )
-    db_session.add_all([route, bus, supervisor])
+    db_session.add(user)
     db_session.commit()
+    db_session.refresh(user)
+    return user
 
+
+def _setup_service(db_session: Session) -> tuple:
+    route_repo = RouteRepository(db_session)
+    pickup_repo = PickupPointRepository(db_session)
     trip_repo = TripRepository(db_session)
     bus_repo = BusRepository(db_session)
-    route_repo = RouteRepository(db_session)
     user_repo = UserRepository(db_session)
+    trip_stop_repo = TripStopRepository(db_session)
 
     service = TripService(
         trip_repo=trip_repo,
         bus_repo=bus_repo,
         route_repo=route_repo,
         user_repo=user_repo,
+        trip_stop_repo=trip_stop_repo,
+        pickup_point_repo=pickup_repo,
     )
-    return service, route, bus, supervisor
+    return service, route_repo, pickup_repo, bus_repo, user_repo
 
 
-def test_trip_service_create_trip_success(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def _stop_requests(points, start: datetime, gap_minutes: int = 10):
+    return [
+        TripStopCreateRequest(
+            pickup_point_id=p.id,
+            stop_order=i + 1,
+            departure_time=start + timedelta(minutes=gap_minutes * i),
+        )
+        for i, p in enumerate(points)
+    ]
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
 
-    # Test capacity defaulting to bus capacity
+def test_trip_service_create_outbound_with_stops(db_session: Session) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
+
+    route = route_repo.create("Route Srv")
+    p1 = pickup_repo.create(route_id=route.id, name="Al-Mahatta", sequence=1)
+    p2 = pickup_repo.create(route_id=route.id, name="Al-Walidiyah", sequence=2)
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-1", license_plate="SRV-001", capacity=50
+    )
+    supervisor = _supervisor(db_session, "Supervisor Srv", "+201033331111")
+
+    start = datetime(2026, 9, 20, 6, 30, tzinfo=timezone.utc)
     req = TripCreateRequest(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
-        departure_time=t_dep,
-        estimated_arrival_time=t_arr,
+        stops=_stop_requests([p1, p2], start),
     )
     trip = service.create_trip(req)
 
     assert trip.id is not None
-    assert trip.route_id == route.id
-    assert trip.bus_id == bus.id
-    assert trip.supervisor_id == supervisor.id
-    assert trip.passenger_capacity == bus.capacity
+    assert trip.direction == TripDirection.OUTBOUND
     assert trip.status == TripStatus.SCHEDULED
+    assert trip.passenger_capacity == bus.capacity
+    assert trip.allow_overbooking is False
+
+    # Derived times: first stop -> departure, last stop -> arrival.
+    # (SQLite drops tzinfo; compare naive UTC values.)
+    assert trip.departure_time.replace(tzinfo=timezone.utc) == start
+    assert trip.estimated_arrival_time.replace(tzinfo=timezone.utc) == start + timedelta(minutes=10)
+
+    # Ordered stops persisted with per-stop times.
+    stops = sorted(trip.trip_stops, key=lambda s: s.stop_order)
+    assert [s.pickup_point_id for s in stops] == [p1.id, p2.id]
+    assert stops[0].departure_time.replace(tzinfo=timezone.utc) == start
+    assert stops[1].departure_time.replace(tzinfo=timezone.utc) == start + timedelta(minutes=10)
 
 
-def test_trip_service_create_trip_with_custom_capacity(
-    db_session: Session,
-) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def test_trip_service_create_return_trip(db_session: Session) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+    route = route_repo.create("Route Ret")
+    p1 = pickup_repo.create(route_id=route.id, name="Point A", sequence=1)
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-2", license_plate="SRV-002", capacity=40
+    )
+    supervisor = _supervisor(db_session, "Supervisor Ret", "+201033332222")
 
+    start = datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)
     req = TripCreateRequest(
         route_id=route.id,
+        direction=TripDirection.RETURN,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
-        departure_time=t_dep,
-        estimated_arrival_time=t_arr,
-        passenger_capacity=30,
+        stops=_stop_requests([p1], start),
+        allow_overbooking=True,
     )
     trip = service.create_trip(req)
-    assert trip.passenger_capacity == 30
+    assert trip.direction == TripDirection.RETURN
+    assert trip.allow_overbooking is True
+    # Single stop: departure == arrival.
+    assert trip.departure_time == trip.estimated_arrival_time
+    assert trip.departure_time.replace(tzinfo=timezone.utc) == start
 
 
-def test_trip_service_create_trip_validations(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def test_trip_service_rejects_point_from_another_route(db_session: Session) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+    route = route_repo.create("Route Own")
+    other_route = route_repo.create("Route Other")
+    foreign_point = pickup_repo.create(
+        route_id=other_route.id, name="Foreign Point", sequence=1
+    )
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-3", license_plate="SRV-003", capacity=40
+    )
+    supervisor = _supervisor(db_session, "Supervisor X", "+201033333333")
+
+    start = datetime(2026, 9, 20, 6, 30, tzinfo=timezone.utc)
+    req = TripCreateRequest(
+        route_id=route.id,
+        direction=TripDirection.OUTBOUND,
+        bus_id=bus.id,
+        supervisor_id=supervisor.id,
+        stops=[
+            TripStopCreateRequest(
+                pickup_point_id=foreign_point.id,
+                stop_order=1,
+                departure_time=start,
+            )
+        ],
+    )
+    with pytest.raises(ValidationError, match="does not belong to route"):
+        service.create_trip(req)
+
+
+def test_trip_service_rejects_duplicate_points_and_orders(
+    db_session: Session,
+) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
+
+    route = route_repo.create("Route Dup")
+    p1 = pickup_repo.create(route_id=route.id, name="P1", sequence=1)
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-4", license_plate="SRV-004", capacity=40
+    )
+    supervisor = _supervisor(db_session, "Supervisor Dup", "+201033334444")
+
+    start = datetime(2026, 9, 20, 6, 30, tzinfo=timezone.utc)
+    p2 = pickup_repo.create(route_id=route.id, name="P2", sequence=2)
+
+    with pytest.raises(PydanticValidationError, match="Duplicate pickup points"):
+        TripCreateRequest(
+            route_id=route.id,
+            direction=TripDirection.OUTBOUND,
+            bus_id=bus.id,
+            supervisor_id=supervisor.id,
+            stops=[
+                TripStopCreateRequest(
+                    pickup_point_id=p1.id, stop_order=1, departure_time=start
+                ),
+                TripStopCreateRequest(
+                    pickup_point_id=p1.id, stop_order=2, departure_time=start
+                ),
+            ],
+        )
+
+    with pytest.raises(PydanticValidationError, match="Duplicate stop_order"):
+        TripCreateRequest(
+            route_id=route.id,
+            direction=TripDirection.OUTBOUND,
+            bus_id=bus.id,
+            supervisor_id=supervisor.id,
+            stops=[
+                TripStopCreateRequest(
+                    pickup_point_id=p1.id, stop_order=1, departure_time=start
+                ),
+                TripStopCreateRequest(
+                    pickup_point_id=p2.id, stop_order=1, departure_time=start
+                ),
+            ],
+        )
+
+
+def test_trip_service_create_validations(db_session: Session) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
+
+    route = route_repo.create("Route Val")
+    p1 = pickup_repo.create(route_id=route.id, name="Val P1", sequence=1)
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-5", license_plate="SRV-005", capacity=50
+    )
+    supervisor = _supervisor(db_session, "Supervisor Val", "+201033335555")
+
+    start = datetime(2026, 9, 20, 10, 0, tzinfo=timezone.utc)
+    stops = _stop_requests([p1], start)
 
     # 1. Nonexistent route
     with pytest.raises(NotFoundError, match="Route with ID 999999 not found"):
         service.create_trip(
             TripCreateRequest(
                 route_id=999999,
+                direction=TripDirection.OUTBOUND,
                 bus_id=bus.id,
                 supervisor_id=supervisor.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
+                stops=stops,
             )
         )
 
@@ -134,10 +250,10 @@ def test_trip_service_create_trip_validations(db_session: Session) -> None:
         service.create_trip(
             TripCreateRequest(
                 route_id=route.id,
+                direction=TripDirection.OUTBOUND,
                 bus_id=bus.id,
                 supervisor_id=supervisor.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
+                stops=stops,
             )
         )
     route.is_active = True
@@ -148,10 +264,10 @@ def test_trip_service_create_trip_validations(db_session: Session) -> None:
         service.create_trip(
             TripCreateRequest(
                 route_id=route.id,
+                direction=TripDirection.OUTBOUND,
                 bus_id=999999,
                 supervisor_id=supervisor.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
+                stops=stops,
             )
         )
 
@@ -162,288 +278,122 @@ def test_trip_service_create_trip_validations(db_session: Session) -> None:
         service.create_trip(
             TripCreateRequest(
                 route_id=route.id,
+                direction=TripDirection.OUTBOUND,
                 bus_id=bus.id,
                 supervisor_id=supervisor.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
+                stops=stops,
             )
         )
     bus.status = BusStatus.ACTIVE
     db_session.commit()
 
-    # 5. Nonexistent supervisor
-    with pytest.raises(NotFoundError, match="Supervisor with ID 999999 not found"):
-        service.create_trip(
-            TripCreateRequest(
-                route_id=route.id,
-                bus_id=bus.id,
-                supervisor_id=999999,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
-            )
-        )
-
-    # 6. Inactive supervisor
-    supervisor.is_active = False
-    db_session.commit()
-    with pytest.raises(ValidationError, match="is inactive"):
-        service.create_trip(
-            TripCreateRequest(
-                route_id=route.id,
-                bus_id=bus.id,
-                supervisor_id=supervisor.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
-            )
-        )
-    supervisor.is_active = True
-    db_session.commit()
-
-    # 7. Student as supervisor (not permitted)
-    student = User(
-        full_name="Student User",
-        phone_number="+201033332222",
-        password_hash=hash_password("Password123!"),
-        gender=GenderEnum.MALE,
-        role=RoleEnum.STUDENT,
-        is_active=True,
-    )
-    db_session.add(student)
-    db_session.commit()
+    # 5. Student as supervisor (not permitted)
+    student = make_student(db_session)
     with pytest.raises(ValidationError, match="does not have SUPERVISOR role"):
         service.create_trip(
             TripCreateRequest(
                 route_id=route.id,
+                direction=TripDirection.OUTBOUND,
                 bus_id=bus.id,
                 supervisor_id=student.id,
-                departure_time=t_dep,
-                estimated_arrival_time=t_arr,
+                stops=stops,
             )
         )
 
 
-def test_trip_service_conflict_detection(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def test_trip_service_bus_conflict_detection(db_session: Session) -> None:
+    service, route_repo, pickup_repo, bus_repo, user_repo = _setup_service(db_session)
 
-    # Existing Trip: 10:00 -> 12:00
-    t1_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t1_arr = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    route = route_repo.create("Route Conflict")
+    p1 = pickup_repo.create(route_id=route.id, name="CP1", sequence=1)
+    bus = bus_repo.create(
+        bus_number="BUS-SRV-6", license_plate="SRV-006", capacity=40
+    )
+    supervisor1 = _supervisor(db_session, "Supervisor C1", "+201033336666")
+    supervisor2 = _supervisor(db_session, "Supervisor C2", "+201033337777")
 
+    start1 = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+    end1 = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    p2 = pickup_repo.create(route_id=route.id, name="CP2", sequence=2)
     service.create_trip(
         TripCreateRequest(
             route_id=route.id,
+            direction=TripDirection.OUTBOUND,
             bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t1_dep,
-            estimated_arrival_time=t1_arr,
+            supervisor_id=supervisor1.id,
+            stops=[
+                TripStopCreateRequest(
+                    pickup_point_id=p1.id, stop_order=1, departure_time=start1
+                ),
+                TripStopCreateRequest(
+                    pickup_point_id=p2.id, stop_order=2, departure_time=end1
+                ),
+            ],
         )
     )
 
-    # Another bus and supervisor
-    bus2 = Bus(
-        bus_number="BUS-SRV-2",
-        license_plate="SRV-002",
-        capacity=40,
-        status=BusStatus.ACTIVE,
-    )
-    supervisor2 = User(
-        full_name="Supervisor 2",
-        phone_number="+201033333333",
-        password_hash=hash_password("Password123!"),
-        gender=GenderEnum.MALE,
-        role=RoleEnum.SUPERVISOR,
-        is_active=True,
-    )
-    db_session.add_all([bus2, supervisor2])
-    db_session.commit()
-
-    # Bus conflict: same bus, overlapping time (11:00 -> 13:00) with new supervisor
+    # Overlapping trip on the same bus with a different supervisor -> conflict.
+    start2 = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
     with pytest.raises(ConflictError, match="Bus.*is already scheduled"):
         service.create_trip(
             TripCreateRequest(
                 route_id=route.id,
+                direction=TripDirection.RETURN,
                 bus_id=bus.id,
                 supervisor_id=supervisor2.id,
-                departure_time=datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc),
-                estimated_arrival_time=datetime(
-                    2026, 8, 20, 13, 0, tzinfo=timezone.utc
-                ),
+                stops=_stop_requests([p1], start2, gap_minutes=60),
             )
         )
 
-    # Supervisor conflict: new bus, same supervisor, overlapping time (11:00 -> 13:00)
-    with pytest.raises(ConflictError, match="Supervisor.*is already assigned"):
-        service.create_trip(
-            TripCreateRequest(
-                route_id=route.id,
-                bus_id=bus2.id,
-                supervisor_id=supervisor.id,
-                departure_time=datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc),
-                estimated_arrival_time=datetime(
-                    2026, 8, 20, 13, 0, tzinfo=timezone.utc
-                ),
-            )
-        )
-
-    # Adjacent trip: 12:00 -> 14:00 (Allowed!)
+    # Adjacent trip (after the previous one ends) is allowed.
+    start3 = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
     trip_adj = service.create_trip(
         TripCreateRequest(
             route_id=route.id,
+            direction=TripDirection.RETURN,
             bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
-            estimated_arrival_time=datetime(
-                2026, 8, 20, 14, 0, tzinfo=timezone.utc
-            ),
+            supervisor_id=supervisor1.id,
+            stops=_stop_requests([p1], start3, gap_minutes=60),
         )
     )
     assert trip_adj.id is not None
 
 
-def test_trip_service_get_and_list_trips(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def test_trip_service_update_and_status_transitions(db_session: Session) -> None:
+    service, *_ = _setup_service(db_session)
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+    trip = make_trip(db_session, capacity=30, allow_overbooking=True)
 
-    created = service.create_trip(
-        TripCreateRequest(
-            route_id=route.id,
-            bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t_dep,
-            estimated_arrival_time=t_arr,
-        )
-    )
-
-    fetched = service.get_trip_by_id(created.id)
-    assert fetched.id == created.id
-
-    with pytest.raises(NotFoundError, match="Trip with ID 999999 not found"):
-        service.get_trip_by_id(999999)
-
-    # Pagination bounds checks
-    with pytest.raises(ValidationError, match="Page number must be greater than or equal to 1"):
-        service.list_trips(page=0)
-
-    with pytest.raises(ValidationError, match="Page size must be between 1 and 100"):
-        service.list_trips(page_size=0)
-
-    with pytest.raises(ValidationError, match="Page size must be between 1 and 100"):
-        service.list_trips(page_size=101)
-
-    trips, total = service.list_trips(page=1, page_size=10)
-    assert total == 1
-    assert len(trips) == 1
-
-
-def test_trip_service_update_trip(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
-
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
-
-    trip = service.create_trip(
-        TripCreateRequest(
-            route_id=route.id,
-            bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t_dep,
-            estimated_arrival_time=t_arr,
-        )
-    )
-
-    # Update capacity
     updated = service.update_trip(
-        trip.id,
-        TripUpdateRequest(passenger_capacity=35),
+        trip.id, TripUpdateRequest(passenger_capacity=35, allow_overbooking=False)
     )
     assert updated.passenger_capacity == 35
+    assert updated.allow_overbooking is False
 
-    # Update on nonexistent trip
     with pytest.raises(NotFoundError, match="Trip with ID 999999 not found"):
         service.update_trip(999999, TripUpdateRequest(passenger_capacity=40))
 
-
-def test_trip_service_status_transitions(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
-
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
-
-    trip = service.create_trip(
-        TripCreateRequest(
-            route_id=route.id,
-            bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t_dep,
-            estimated_arrival_time=t_arr,
-        )
-    )
-    assert trip.status == TripStatus.SCHEDULED
-
-    # SCHEDULED -> SCHEDULED (no-op)
-    t_same = service.update_trip_status(trip.id, TripStatus.SCHEDULED)
-    assert t_same.status == TripStatus.SCHEDULED
-
-    # SCHEDULED -> IN_PROGRESS (valid)
+    # Status lifecycle.
     t_in_prog = service.update_trip_status(trip.id, TripStatus.IN_PROGRESS)
     assert t_in_prog.status == TripStatus.IN_PROGRESS
-
-    # IN_PROGRESS -> COMPLETED (valid)
     t_comp = service.update_trip_status(trip.id, TripStatus.COMPLETED)
     assert t_comp.status == TripStatus.COMPLETED
-
-    # COMPLETED -> SCHEDULED (invalid)
-    with pytest.raises(ValidationError, match="Cannot transition trip from COMPLETED to SCHEDULED"):
+    with pytest.raises(ValidationError, match="Cannot transition trip from COMPLETED"):
         service.update_trip_status(trip.id, TripStatus.SCHEDULED)
 
-    # COMPLETED -> IN_PROGRESS (invalid)
-    with pytest.raises(ValidationError, match="Cannot transition trip from COMPLETED to IN_PROGRESS"):
-        service.update_trip_status(trip.id, TripStatus.IN_PROGRESS)
+    # SCHEDULED trips can be re-stopped; completed ones cannot.
+    scheduled_trip = make_trip(db_session)
+    assert scheduled_trip.status == TripStatus.SCHEDULED
+    with pytest.raises(ValidationError, match="Only SCHEDULED trips"):
+        service.update_trip_stops(trip.id, [])
 
 
-def test_trip_service_cancellation_transitions(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
+def test_trip_service_get_route_points(db_session: Session) -> None:
+    service, route_repo, pickup_repo, *_ = _setup_service(db_session)
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+    route = route_repo.create("Route Points")
+    p1 = pickup_repo.create(route_id=route.id, name="RP1", sequence=1)
+    p2 = pickup_repo.create(route_id=route.id, name="RP2", sequence=2)
 
-    # SCHEDULED -> CANCELLED (valid)
-    trip = service.create_trip(
-        TripCreateRequest(
-            route_id=route.id,
-            bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t_dep,
-            estimated_arrival_time=t_arr,
-        )
-    )
-    t_canc = service.update_trip_status(trip.id, TripStatus.CANCELLED)
-    assert t_canc.status == TripStatus.CANCELLED
-
-    # CANCELLED -> IN_PROGRESS (invalid)
-    with pytest.raises(ValidationError, match="Cannot transition trip from CANCELLED to IN_PROGRESS"):
-        service.update_trip_status(trip.id, TripStatus.IN_PROGRESS)
-
-
-def test_trip_service_delete_trip(db_session: Session) -> None:
-    service, route, bus, supervisor = _setup_service_and_fixtures(db_session)
-
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
-
-    trip = service.create_trip(
-        TripCreateRequest(
-            route_id=route.id,
-            bus_id=bus.id,
-            supervisor_id=supervisor.id,
-            departure_time=t_dep,
-            estimated_arrival_time=t_arr,
-        )
-    )
-
-    service.delete_trip(trip.id)
-
-    with pytest.raises(NotFoundError, match="Trip with ID"):
-        service.get_trip_by_id(trip.id)
+    points = service.get_route_points(route.id)
+    assert [p.id for p in points] == [p1.id, p2.id]

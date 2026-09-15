@@ -106,9 +106,9 @@ The server runs these checks in order; each failure returns `{"detail": "<messag
 | 7 | Student account active + role STUDENT | 422 | `"Student account is inactive"` |
 | 8 | Subscription date window | 422 | `"Subscription has expired"` / `"Subscription is not yet valid for today's date"` (past `end_date` also auto-flips status to EXPIRED) |
 | 9 | Subscription status | 422 | `"Subscription is cancelled"` / `"Subscription has expired"` / `"Subscription is not active (current status: PENDING)"` |
-| 10 | **Daily reservation exists** for the trip's service date, belongs to this student's subscription, and is for THIS trip | 422 | `"No confirmed daily transportation selection found for this trip's date"` / `"Daily transportation selection is not for this trip"` |
-| 11 | Selection covers the direction (`direction_mode`) | 422 | `"Daily transportation selection does not include a return journey"` |
-| 12 | Scanned pickup point matches the reservation's selected point for the direction | 422 | `"Scanned pickup point does not match the selected pickup point for this trip"` |
+| 10 | **Confirmed reservation exists** for the trip's service date, belongs to this student, and is for THIS trip | 422 | `"No confirmed reservation found for this trip's date"` / `"Reservation is not for this trip"` |
+| 11 | Reservation direction matches the scanned direction (trip direction) | 422 | `"Reservation direction does not match the trip direction"` |
+| 12 | Scanned pickup point matches the reservation's `selected_pickup_point_id` | 422 | `"Scanned pickup point does not match the selected pickup point for this trip"` |
 | 13 | Pickup point belongs to the trip | 422 | `"Scanned pickup point is not configured for this trip"` |
 | 14 | **No duplicate scan** for the same subscription + trip + direction | 409 | `"Student has already boarded OUTBOUND for this trip"` |
 | 15 | (re-checked under DB row lock) status, duplicate, **daily 2-scan cap**, **weekly distinct-day allowance** | 409/422 | `"Daily QR limit reached: at most 2 scans per day (one outbound and one return)"` / `"Weekly usage limit reached: the subscription allows at most 4 usage days per week…"` |
@@ -177,18 +177,17 @@ Assigned supervisor or CEO. Returns the students who SELECTED this trip for the 
   "student_name": "Ahmed Ali",
   "subscription_id": 88,
   "subscription_status": "ACTIVE",
-  "service_date": "2026-09-15",
-  "direction_mode": "BOTH",
+  "service_date": "2026-09-20",
+  "direction": "OUTBOUND",
   "payment_status": "VERIFIED",
-  "outbound_pickup": "Cairo University Gate 3",
-  "return_pickup": "Main Gate",
+  "selected_point": "Al-Mahatta",
   "outbound_boarded": true,
   "return_boarded": false,
   "last_boarded_at": "2026-09-15T07:35:00Z"
 }
 ```
 
-`outbound_boarded` / `return_boarded` are per-**trip** attendance indicators — ideal for a live checklist. The roster is built from confirmed daily reservations, so a student only appears after making tomorrow's/that day's selection.
+`outbound_boarded` / `return_boarded` are per-**trip** attendance indicators — ideal for a live checklist. The roster is built from confirmed reservations, so a student only appears after booking that trip for its service date.
 
 ### Trip records — `GET /boarding/trips/{trip_id}/records`
 `BoardingRecordResponse[]` (timestamped, includes supervisor and pickup names).
@@ -205,7 +204,7 @@ Owner student / route-assigned supervisor / CEO; array of ride records with `dir
 |---|---|---|
 | Weekly limit reached | scan `422` "Weekly usage limit reached…" or `remaining_usage_days_this_week == 0` | Show weekly-limit notice ("resets Monday") |
 | Daily scan cap reached | scan `422` "Daily QR limit reached…" or `qr_usages_today >= 2` | Show daily-limit notice |
-| No daily selection | scan `422` "No confirmed daily transportation selection…" | Student must create tomorrow's selection ([RESERVATIONS.md](RESERVATIONS.md)) |
+| No daily selection | scan `422` "No confirmed reservation found…" | Student must book the trip ([RESERVATIONS.md](RESERVATIONS.md)) |
 | Selection mismatch (trip/pickup/direction) | scan `422` "…selection is not for this trip" / "does not match the selected pickup point" | Supervisor picked the wrong trip/point, or student changed selection |
 | Duplicate scan | scan `409` "already boarded … for this trip" | Mark that direction as boarded; do not retry |
 | Unauthorized scanner | scan `403` "not assigned as the supervisor" | Supervisor picked the wrong trip — fix trip selection |

@@ -9,12 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.models.bus import Bus
 from app.models.enums import (
+    BoardingDirection,
     BusStatus,
     GenderEnum,
     ReservationStatus,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
 from app.models.reservation import Reservation
@@ -26,7 +28,7 @@ from app.models.trip import Trip
 from app.models.user import User
 
 
-def _setup_entities(session: Session) -> tuple[Trip, User, Subscription]:
+def _setup_entities(session: Session) -> tuple[Trip, User, Subscription, Route]:
     uid = uuid.uuid4().hex[:8]
     s1 = Station(
         name=f"Model Origin {uid}", code=f"OR-{uid}", latitude=30.0, longitude=31.0
@@ -38,12 +40,7 @@ def _setup_entities(session: Session) -> tuple[Trip, User, Subscription]:
     session.commit()
 
     route = Route(
-        route_number=f"R-{uid}",
         name=f"Route Model {uid}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=20,
         is_active=True,
     )
     bus = Bus(
@@ -102,6 +99,7 @@ def _setup_entities(session: Session) -> tuple[Trip, User, Subscription]:
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now + timedelta(days=1),
@@ -113,7 +111,7 @@ def _setup_entities(session: Session) -> tuple[Trip, User, Subscription]:
     session.commit()
     session.refresh(trip)
 
-    return trip, student, subscription
+    return trip, student, subscription, route
 
 
 def uuid_safe_price(uid: str):
@@ -122,14 +120,27 @@ def uuid_safe_price(uid: str):
     return Decimal("500.00")
 
 
+def _pickup_point(session: Session, route: Route):
+    """Create (or reuse) a pickup point on the route for reservation rows."""
+    from app.models.pickup_point import PickupPoint
+
+    point = PickupPoint(route_id=route.id, name=f"Point {uuid.uuid4().hex[:6]}", sequence=1)
+    session.add(point)
+    session.commit()
+    session.refresh(point)
+    return point
+
+
 def test_reservation_model_crud_and_defaults(db_session: Session) -> None:
-    trip, student, subscription = _setup_entities(db_session)
+    trip, student, subscription, route = _setup_entities(db_session)
 
     res = Reservation(
         trip_id=trip.id,
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=_pickup_point(db_session, route).id,
     )
     db_session.add(res)
     db_session.commit()
@@ -141,7 +152,7 @@ def test_reservation_model_crud_and_defaults(db_session: Session) -> None:
     assert res.cancelled_at is None
     assert res.created_at is not None
     assert res.updated_at is not None
-    assert res.direction_mode == "BOTH"
+    assert res.direction == BoardingDirection.OUTBOUND
     assert res.trip.id == trip.id
     assert res.student.id == student.id
     assert res.subscription.id == subscription.id
@@ -151,24 +162,29 @@ def test_reservation_model_crud_and_defaults(db_session: Session) -> None:
 
 def test_reservation_unique_active_constraint(db_session: Session) -> None:
     """One active selection per student per service date (partial unique index)."""
-    trip, student, subscription = _setup_entities(db_session)
+    trip, student, subscription, route = _setup_entities(db_session)
 
+    point = _pickup_point(db_session, route)
     res1 = Reservation(
         trip_id=trip.id,
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     db_session.add(res1)
     db_session.commit()
 
-    # Second active confirmed reservation for the same student + service date fails
+    # Second active confirmed reservation for the same student + date + direction fails
     res2 = Reservation(
         trip_id=trip.id,
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     db_session.add(res2)
@@ -179,7 +195,8 @@ def test_reservation_unique_active_constraint(db_session: Session) -> None:
 
 def test_reservation_multiple_cancelled_allowed(db_session: Session) -> None:
     """Cancelled selections don't block new ones (partial index: CONFIRMED only)."""
-    trip, student, subscription = _setup_entities(db_session)
+    trip, student, subscription, route = _setup_entities(db_session)
+    point = _pickup_point(db_session, route)
 
     # First cancelled
     res1 = Reservation(
@@ -187,6 +204,8 @@ def test_reservation_multiple_cancelled_allowed(db_session: Session) -> None:
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CANCELLED,
         cancelled_at=datetime.now(timezone.utc),
     )
@@ -196,6 +215,8 @@ def test_reservation_multiple_cancelled_allowed(db_session: Session) -> None:
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CANCELLED,
         cancelled_at=datetime.now(timezone.utc),
     )
@@ -205,6 +226,8 @@ def test_reservation_multiple_cancelled_allowed(db_session: Session) -> None:
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     db_session.add_all([res1, res2, res3])

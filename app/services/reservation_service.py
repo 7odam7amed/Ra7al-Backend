@@ -6,36 +6,45 @@ from app.exceptions.base import (
     NotFoundError,
     ValidationError,
 )
-from app.models.enums import ReservationStatus, RoleEnum, SubscriptionStatus, TripStatus
+from app.models.enums import (
+    BoardingDirection,
+    ReservationStatus,
+    RoleEnum,
+    SubscriptionStatus,
+    TripDirection,
+    TripStatus,
+)
 from app.models.reservation import Reservation
+from app.models.trip import Trip
 from app.models.user import User
 from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.repositories.trip_repository import TripRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.reservation import ReservationCreateRequest
+from app.schemas.reservation import BookingState, ReservationCreateRequest
 from app.utils.dates import business_today, week_window
 
 
 class ReservationService:
-    """Service for DAILY transportation selection (trip + pickup points per service date).
+    """Service for directed daily transportation bookings (one row per direction).
 
     Business rules enforced here:
       - The student must own a valid subscription (ACTIVE, within validity
-        window, not cancelled/expired/rejected) that COVERS the requested
-        service date — checked server-side, never trusted from the request.
-      - The service date comes from the request (optional; defaults to
-        TOMORROW) and must be today or later. Each explicit selection creates
-        one reservation: DAILY subscriptions are flexible — transportation is
-        never booked automatically for every day of the validity window.
+        window) that COVERS the requested service date.
+      - The service date defaults to TOMORROW and must be today or later.
       - The trip must exist, be SCHEDULED, and depart on the service date.
-      - Both pickup points must belong to the selected trip (and therefore to
-        the trip's route). Cross-route pickup points are rejected.
-      - Weekly usage limit: at most ``days_per_week_snapshot`` DISTINCT usage
-        days per calendar week (Mon-Sun, UTC) per subscription. Each CONFIRMED
-        reservation is one usage day; the limit is re-checked under a row lock
-        so concurrent bookings cannot bypass it. Reservations from other
-        subscriptions never count.
+      - The selected point must be one of the trip's stops (and therefore
+        belongs to the trip's route).
+      - ONE OUTBOUND booking + ONE RETURN booking per student per service
+        date (also enforced by a partial unique index).
+      - Capacity: when the trip is full and allow_overbooking is False, the
+        trip is FULL for new bookings. A student with a valid existing booking
+        always sees BOOKED, never FULL.
+      - Weekly usage-day limit (days_per_week_snapshot, Mon-Sun, UTC) with
+        concurrency-safe re-checking.
+      - Destination logic (never stored on the trip):
+          OUTBOUND: pickup point -> the student's registered university.
+          RETURN:   the student's university -> selected drop-off point.
     """
 
     def __init__(
@@ -50,6 +59,10 @@ class ReservationService:
         self.trip_repo = trip_repo
         self.user_repo = user_repo
 
+    # ------------------------------------------------------------------
+    # Shared validation helpers
+    # ------------------------------------------------------------------
+
     def validate_student(self, student_id: int) -> User:
         """Validate that the student exists, is active, and has the STUDENT role."""
         student = self.user_repo.get_by_id(student_id)
@@ -62,12 +75,10 @@ class ReservationService:
         return student
 
     def _get_valid_subscription(self, student_id: int, service_date: date):
-        """Fetch the student's subscription that is valid for the service date.
+        """Fetch the student's subscription valid for the service date.
 
-        Not just "a row exists": the subscription must be ACTIVE (PENDING is
-        rejected — payment must be verified first) and the service date must
-        fall inside its inclusive validity window. Expiration always wins over
-        any remaining weekly capacity.
+        Must be ACTIVE (PENDING is rejected) and cover the date; expiration
+        always wins over remaining weekly capacity.
         """
         subscription = self.subscription_repo.get_active_for_student_on_date(
             student_id, service_date
@@ -79,13 +90,7 @@ class ReservationService:
         return subscription
 
     def _resolve_service_date(self, requested: date | None) -> date:
-        """Resolve the service date from the request.
-
-        None -> TOMORROW (backward-compatible default). Any supplied date in
-        the past (before the business 'today') is rejected; future dates are
-        accepted and validated against subscription coverage and the weekly
-        usage limit by the caller.
-        """
+        """Resolve the service date (None -> TOMORROW); reject past dates."""
         if requested is None:
             return business_today() + timedelta(days=1)
         if requested < business_today():
@@ -95,15 +100,7 @@ class ReservationService:
         return requested
 
     def _enforce_weekly_usage_limit(self, subscription, service_date: date) -> None:
-        """Enforce the subscription's weekly usage-day limit (Mon-Sun, UTC).
-
-        Counts the subscription's own CONFIRMED reservations inside the
-        calendar week (Mon-Sun) containing ``service_date`` — reservations
-        from other subscriptions never count. The subscription row is locked
-        FOR UPDATE first and the count re-checked after acquiring the lock,
-        so two concurrent bookings cannot both pass the limit. Unused weekly
-        allowance does NOT roll over (each week starts fresh).
-        """
+        """Enforce the weekly usage-day limit (Mon-Sun, UTC) under a row lock."""
         locked = self.reservation_repo.get_subscription_row_for_update(subscription.id)
         if locked is None:
             raise NotFoundError("Subscription not found")
@@ -121,8 +118,8 @@ class ReservationService:
                 f"Unused weekly allowance does not roll over."
             )
 
-    def _validate_trip_for_date(self, trip_id: int, service_date: date):
-        """Lock the trip row and verify it exists, is scheduled, and departs on the service date."""
+    def _validate_trip_for_date(self, trip_id: int, service_date: date) -> Trip:
+        """Lock the trip row and verify it exists, is scheduled, and departs on the date."""
         trip = self.reservation_repo.get_trip_for_update(trip_id)
         if trip is None:
             raise NotFoundError(f"Trip with ID {trip_id} not found")
@@ -141,35 +138,113 @@ class ReservationService:
             )
         return trip
 
-    def _validate_pickup_point_for_trip(
-        self, pickup_point_id: int | None, trip, label: str
-    ) -> int | None:
-        """Verify a pickup point exists and belongs to the selected trip's route."""
-        if pickup_point_id is None:
-            return None
-        point = trip and next(
-            (p for p in (trip.pickup_points or []) if p.id == pickup_point_id), None
-        )
-        if point is None:
+    def _validate_selected_point(self, trip: Trip, point_id: int) -> int:
+        """Verify the selected point is one of the trip's stops."""
+        stop_point_ids = {s.pickup_point_id for s in (trip.trip_stops or [])}
+        if point_id not in stop_point_ids:
             raise ValidationError(
-                f"Selected {label} (ID: {pickup_point_id}) does not belong to trip {trip.id}"
+                f"Selected point (ID: {point_id}) is not one of the stops of trip {trip.id}"
             )
-        return point.id
+        return point_id
+
+    @staticmethod
+    def _direction_of(trip: Trip) -> BoardingDirection:
+        """Map the trip's direction to the reservation's direction enum."""
+        if trip.direction == TripDirection.OUTBOUND:
+            return BoardingDirection.OUTBOUND
+        return BoardingDirection.RETURN
+
+    # ------------------------------------------------------------------
+    # Destination logic (per-student, never stored on the trip)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def university_name(student: User) -> str | None:
+        """The student's registered university name (dynamic outbound origin/destination)."""
+        university = getattr(student, "university", None)
+        if university is not None:
+            return university.name
+        return None
+
+    def build_student_trip_view(
+        self,
+        trip: Trip,
+        student: User,
+        service_date: date,
+        existing: Reservation | None = None,
+    ) -> dict:
+        """Build the student-facing view of a trip with booking state and destination.
+
+        OUTBOUND: origin = the student's selected pickup point (their booked
+        point, or None until booking), destination = the student's registered
+        university. RETURN: origin = the student's university, destination =
+        the student's selected drop-off point. Two students on the same
+        outbound trip may therefore see different destinations.
+        """
+        confirmed_count = self.reservation_repo.count_confirmed_for_trip(trip.id)
+        available_seats = trip.passenger_capacity - confirmed_count
+
+        if existing is not None and existing.status == ReservationStatus.CONFIRMED:
+            booking_state = BookingState.BOOKED
+        elif available_seats <= 0 and not trip.allow_overbooking:
+            booking_state = BookingState.FULL
+        else:
+            booking_state = BookingState.AVAILABLE
+
+        selected_point = existing.selected_pickup_point if existing else None
+        university = self.university_name(student)
+
+        if trip.direction == TripDirection.OUTBOUND:
+            origin = selected_point.name if selected_point else None
+            destination = university
+        else:
+            origin = university
+            destination = selected_point.name if selected_point else None
+
+        stops = sorted(trip.trip_stops or [], key=lambda s: s.stop_order)
+        stops_view = [
+            {
+                "id": s.id,
+                "trip_id": s.trip_id,
+                "pickup_point_id": s.pickup_point_id,
+                "stop_order": s.stop_order,
+                "departure_time": s.departure_time,
+                "point_name": s.pickup_point.name if s.pickup_point else None,
+                "address": s.pickup_point.address if s.pickup_point else None,
+            }
+            for s in stops
+        ]
+
+        return {
+            "trip_id": trip.id,
+            "direction": trip.direction,
+            "route": trip.route,
+            "origin": origin,
+            "destination": destination,
+            "selected_point_id": existing.selected_pickup_point_id if existing else None,
+            "estimated_arrival_time": trip.estimated_arrival_time,
+            "booking_state": booking_state,
+            "departure_time": trip.departure_time,
+            "status": trip.status,
+            "passenger_capacity": trip.passenger_capacity,
+            "confirmed_reservations_count": confirmed_count,
+            "available_seats": available_seats,
+            "bus": trip.bus,
+            "stops": stops_view,
+            "pickup_points": list(trip.route.pickup_points) if trip.route else [],
+        }
+
+    # ------------------------------------------------------------------
+    # Booking
+    # ------------------------------------------------------------------
 
     def book_trip(
         self,
         student_id: int,
         data: ReservationCreateRequest,
     ) -> Reservation:
-        """Create the student's daily transportation selection for the requested date.
-
-        The service date defaults to TOMORROW when the request omits it.
-        DAILY subscriptions are flexible: the student explicitly selects each
-        transportation date, subject to subscription coverage and the weekly
-        usage-day limit.
-        """
-        # 0. Resolve the service date server-side (request value or TOMORROW);
-        #    past dates are rejected here.
+        """Create ONE directed booking (outbound or return) for the service date."""
+        # 0. Resolve the service date server-side; past dates are rejected.
         service_date = self._resolve_service_date(data.service_date)
 
         # 1. Validate student
@@ -180,45 +255,41 @@ class ReservationService:
 
         # 3. Lock trip and validate existence, status, and service date.
         trip = self._validate_trip_for_date(data.trip_id, service_date)
+        direction = self._direction_of(trip)
 
-        # 4. Validate pickup points against the trip (cross-route rejection).
-        outbound_id = self._validate_pickup_point_for_trip(
-            data.outbound_pickup_point_id, trip, label="outbound pickup point"
-        )
-        return_id = self._validate_pickup_point_for_trip(
-            data.return_pickup_point_id, trip, label="return pickup point"
+        # 4. Validate the selected point is one of the trip's stops.
+        selected_point_id = self._validate_selected_point(
+            trip, data.selected_pickup_point_id
         )
 
-        # 5. Duplicate daily-selection guard (one active selection per day).
-        existing = self.reservation_repo.get_active_for_student_and_date(
-            student_id, service_date
+        # 5. One booking per direction per service date (one outbound + one return).
+        existing = self.reservation_repo.get_active_for_student_date_direction(
+            student_id, service_date, direction
         )
         if existing is not None:
             raise ConflictError(
-                "Student already has an active daily selection for the requested date; "
+                f"Student already has an active {direction.value} booking for the requested date; "
                 "cancel it before creating a new one"
             )
 
-        # 6. Weekly usage-day limit (days_per_week_snapshot, Mon-Sun, UTC).
-        #    Checked after the duplicate guard so replacing a same-day selection
-        #    is never blocked; runs under a row lock for concurrency safety.
+        # 6. Weekly usage-day limit (days_per_week_snapshot, Mon-Sun, UTC),
+        #    under a row lock for concurrency safety.
         self._enforce_weekly_usage_limit(subscription, service_date)
 
-        # 7. Capacity check.
-        confirmed_count = self.reservation_repo.count_confirmed_for_trip(data.trip_id)
-        if confirmed_count >= trip.passenger_capacity:
+        # 7. Capacity check (allow_overbooking permits exceeding capacity).
+        confirmed_count = self.reservation_repo.count_confirmed_for_trip(trip.id)
+        if confirmed_count >= trip.passenger_capacity and not trip.allow_overbooking:
             raise ConflictError("No available seats for this trip")
 
-        # 8. Create the daily selection.
+        # 8. Create the directed booking.
         return self.reservation_repo.create(
-            trip_id=data.trip_id,
+            trip_id=trip.id,
             student_id=student_id,
             subscription_id=subscription.id,
             service_date=service_date,
+            direction=direction,
+            selected_pickup_point_id=selected_point_id,
             status=ReservationStatus.CONFIRMED,
-            outbound_pickup_point_id=outbound_id,
-            return_pickup_point_id=return_id,
-            direction_mode=data.direction_mode,
         )
 
     def update_selection(
@@ -226,69 +297,163 @@ class ReservationService:
         student_id: int,
         data: ReservationCreateRequest,
     ) -> Reservation:
-        """Replace the student's existing selection for the resolved date."""
+        """Replace the student's existing booking for the resolved date+direction.
+
+        The direction is derived from the new trip; the student may switch to
+        a different trip or point in the SAME direction only.
+        """
         service_date = self._resolve_service_date(data.service_date)
 
         self.validate_student(student_id)
         subscription = self._get_valid_subscription(student_id, service_date)
         trip = self._validate_trip_for_date(data.trip_id, service_date)
-        outbound_id = self._validate_pickup_point_for_trip(
-            data.outbound_pickup_point_id, trip, label="outbound pickup point"
-        )
-        return_id = self._validate_pickup_point_for_trip(
-            data.return_pickup_point_id, trip, label="return pickup point"
+        direction = self._direction_of(trip)
+        selected_point_id = self._validate_selected_point(
+            trip, data.selected_pickup_point_id
         )
 
-        existing = self.reservation_repo.get_active_for_student_and_date(
-            student_id, service_date
+        existing = self.reservation_repo.get_active_for_student_date_direction(
+            student_id, service_date, direction
         )
         if existing is None:
             raise NotFoundError(
-                "No active daily selection exists for tomorrow; create one first"
+                f"No active {direction.value} booking exists for the requested date; create one first"
             )
 
         if existing.trip_id != trip.id:
             confirmed_count = self.reservation_repo.count_confirmed_for_trip(trip.id)
-            if confirmed_count >= trip.passenger_capacity:
+            if confirmed_count >= trip.passenger_capacity and not trip.allow_overbooking:
                 raise ConflictError("No available seats for this trip")
 
-        updated = self.reservation_repo.replace_selection(
+        return self.reservation_repo.replace_selection(
             reservation=existing,
             trip_id=trip.id,
             subscription_id=subscription.id,
-            outbound_pickup_point_id=outbound_id,
-            return_pickup_point_id=return_id,
-            direction_mode=data.direction_mode,
+            direction=direction,
+            selected_pickup_point_id=selected_point_id,
         )
-        return updated
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    def list_upcoming_trips(
+        self,
+        student_id: int,
+        page: int = 1,
+        page_size: int = 20,
+        direction: TripDirection | None = None,
+    ) -> tuple[list[dict], int]:
+        """All eligible upcoming trips (not just tomorrow) with booking states.
+
+        Upcoming = SCHEDULED trips departing today or later. Each item carries
+        the student's booking state (AVAILABLE/BOOKED/FULL) and the dynamic
+        destination for their account.
+        """
+        if page < 1:
+            raise ValidationError("Page number must be greater than or equal to 1")
+        if page_size < 1 or page_size > 100:
+            raise ValidationError("Page size must be between 1 and 100")
+
+        student = self.validate_student(student_id)
+
+        now_start = datetime.combine(
+            business_today(), datetime.min.time(), tzinfo=timezone.utc
+        )
+        trips, total = self.trip_repo.list(
+            page=page,
+            page_size=page_size,
+            status=TripStatus.SCHEDULED,
+            direction=direction,
+            departure_after=now_start,
+        )
+
+        items = []
+        for trip in trips:
+            existing = self.reservation_repo.get_active_for_student_date_direction(
+                student_id, trip.departure_time.date(), self._direction_of(trip)
+            )
+            items.append(
+                self.build_student_trip_view(trip, student, business_today(), existing)
+            )
+        return items, total
+
+    def get_trip_for_student(
+        self,
+        trip_id: int,
+        student_id: int,
+        service_date: date | None = None,
+    ) -> dict:
+        """Trip details for one student with derived destination and booking state."""
+        student = self.validate_student(student_id)
+        trip = self.trip_repo.get_by_id(trip_id)
+        if trip is None:
+            raise NotFoundError(f"Trip with ID {trip_id} not found")
+
+        resolved_date = service_date or trip.departure_time.date()
+        existing = self.reservation_repo.get_active_for_student_date_direction(
+            student_id, resolved_date, self._direction_of(trip)
+        )
+        return self.build_student_trip_view(trip, student, resolved_date, existing)
 
     def get_my_selection_for_date(
         self,
         student_id: int,
         service_date: date | None = None,
-    ) -> Reservation:
-        """Fetch the student's daily selection (default: tomorrow; 404 if none)."""
+        direction: BoardingDirection | None = None,
+    ) -> list[Reservation]:
+        """The student's bookings for a date (both directions by default)."""
         resolved_date = service_date or (business_today() + timedelta(days=1))
-        reservation = self.reservation_repo.get_active_for_student_and_date(
-            student_id, resolved_date
+        reservations: list[Reservation] = []
+        directions = (
+            [direction] if direction else [BoardingDirection.OUTBOUND, BoardingDirection.RETURN]
         )
-        if reservation is None:
-            raise NotFoundError(
-                "No daily transportation selection found for the requested date"
+        for d in directions:
+            reservation = self.reservation_repo.get_active_for_student_date_direction(
+                student_id, resolved_date, d
             )
-        return reservation
+            if reservation is not None:
+                reservations.append(reservation)
+        if not reservations:
+            raise NotFoundError(
+                "No daily transportation booking found for the requested date"
+            )
+        return reservations
+
+    def get_my_trip_history(
+        self,
+        student_id: int,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Reservation], int]:
+        """Completed trips the student participated in (bookings on COMPLETED trips)."""
+        if page < 1:
+            raise ValidationError("Page number must be greater than or equal to 1")
+        if page_size < 1 or page_size > 100:
+            raise ValidationError("Page size must be between 1 and 100")
+
+        return self.reservation_repo.list_for_student(
+            student_id=student_id,
+            page=page,
+            page_size=page_size,
+            status=None,
+            trip_status=TripStatus.COMPLETED,
+        )
+
+    # ------------------------------------------------------------------
+    # Cancellation / detail / admin lists
+    # ------------------------------------------------------------------
 
     def cancel_reservation(
         self,
         reservation_id: int,
         current_user: User,
     ) -> Reservation:
-        """Cancel an existing daily selection following ownership and state rules."""
+        """Cancel an existing booking following ownership and state rules."""
         reservation = self.reservation_repo.get_by_id(reservation_id)
         if reservation is None:
             raise NotFoundError(f"Reservation with ID {reservation_id} not found")
 
-        # Role and ownership check
         if current_user.role == RoleEnum.STUDENT:
             if reservation.student_id != current_user.id:
                 raise ForbiddenError(
@@ -297,7 +462,6 @@ class ReservationService:
         elif current_user.role not in (RoleEnum.CEO, RoleEnum.SUPERVISOR):
             raise ForbiddenError("You do not have permission to cancel reservations")
 
-        # State check
         if reservation.status == ReservationStatus.CANCELLED:
             raise ValidationError("Reservation is already cancelled")
 
@@ -329,11 +493,12 @@ class ReservationService:
         page: int = 1,
         page_size: int = 20,
         status: ReservationStatus | None = None,
+        direction: BoardingDirection | None = None,
         trip_id: int | None = None,
         service_date_from: date | None = None,
         service_date_to: date | None = None,
     ) -> tuple[list[Reservation], int]:
-        """List daily selections for the authenticated student with pagination."""
+        """List bookings for the authenticated student with pagination."""
         if page < 1:
             raise ValidationError("Page number must be greater than or equal to 1")
         if page_size < 1 or page_size > 100:
@@ -344,6 +509,7 @@ class ReservationService:
             page=page,
             page_size=page_size,
             status=status,
+            direction=direction,
             trip_id=trip_id,
             service_date_from=service_date_from,
             service_date_to=service_date_to,
@@ -355,13 +521,14 @@ class ReservationService:
         page_size: int = 20,
         trip_id: int | None = None,
         student_id: int | None = None,
+        direction: BoardingDirection | None = None,
         status: ReservationStatus | None = None,
         service_date_from: date | None = None,
         service_date_to: date | None = None,
         booked_after: datetime | None = None,
         booked_before: datetime | None = None,
     ) -> tuple[list[Reservation], int]:
-        """List all daily selections for administration with multi-field filters."""
+        """List all bookings for administration with multi-field filters."""
         if page < 1:
             raise ValidationError("Page number must be greater than or equal to 1")
         if page_size < 1 or page_size > 100:
@@ -372,6 +539,7 @@ class ReservationService:
             page_size=page_size,
             trip_id=trip_id,
             student_id=student_id,
+            direction=direction,
             status=status,
             service_date_from=service_date_from,
             service_date_to=service_date_to,
@@ -379,62 +547,31 @@ class ReservationService:
             booked_before=booked_before,
         )
 
-    def list_available_trips(
+    def list_trip_history(
         self,
+        current_user: User,
         page: int = 1,
         page_size: int = 20,
-        route_id: int | None = None,
-    ) -> tuple[list[dict], int]:
-        """List trips departing TOMORROW with available capacity for daily selection."""
+    ) -> tuple[list[Trip], int]:
+        """Completed trip history scoped by role.
+
+        CEO: all completed trips. Supervisor: only trips assigned to them.
+        Students use get_my_trip_history (participation-scoped).
+        """
         if page < 1:
             raise ValidationError("Page number must be greater than or equal to 1")
         if page_size < 1 or page_size > 100:
             raise ValidationError("Page size must be between 1 and 100")
 
-        service_date = business_today() + timedelta(days=1)
-        day_start = datetime.combine(service_date, datetime.min.time()).replace(
-            tzinfo=timezone.utc
+        supervisor_id = None
+        if current_user.role == RoleEnum.SUPERVISOR:
+            supervisor_id = current_user.id
+        elif current_user.role != RoleEnum.CEO:
+            raise ForbiddenError("Access denied")
+
+        return self.trip_repo.list(
+            page=page,
+            page_size=page_size,
+            status=TripStatus.COMPLETED,
+            supervisor_id=supervisor_id,
         )
-        day_end = day_start + timedelta(days=1)
-
-        trips, _ = self.trip_repo.list(
-            page=1,
-            page_size=1000,
-            status=TripStatus.SCHEDULED,
-            route_id=route_id,
-            departure_after=day_start,
-            departure_before=day_end,
-        )
-
-        available_trips = []
-        for trip in trips:
-            confirmed_count = self.reservation_repo.count_confirmed_for_trip(trip.id)
-            available_seats = trip.passenger_capacity - confirmed_count
-            if available_seats > 0:
-                available_trips.append(
-                    {
-                        "id": trip.id,
-                        "route_id": trip.route_id,
-                        "bus_id": trip.bus_id,
-                        "supervisor_id": trip.supervisor_id,
-                        "departure_time": trip.departure_time,
-                        "estimated_arrival_time": trip.estimated_arrival_time,
-                        "status": trip.status,
-                        "passenger_capacity": trip.passenger_capacity,
-                        "confirmed_reservations_count": confirmed_count,
-                        "available_seats": available_seats,
-                        "fare_amount": trip.fare_amount,
-                        "created_at": trip.created_at,
-                        "updated_at": trip.updated_at,
-                        "route": trip.route,
-                        "bus": trip.bus,
-                        # Ordered pickup points are eager-loaded by the trip
-                        # repository, so this adds no extra queries (no N+1).
-                        "pickup_points": list(trip.pickup_points),
-                    }
-                )
-
-        total = len(available_trips)
-        offset = (page - 1) * page_size
-        paginated_items = available_trips[offset : offset + page_size]
-        return paginated_items, total

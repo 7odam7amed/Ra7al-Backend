@@ -1,8 +1,6 @@
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models.route import Route
-from app.models.route_stop import RouteStop
 from app.models.station import Station
 
 
@@ -118,15 +116,10 @@ class StationRepository:
         self.db.commit()
 
     def is_referenced_by_routes(self, station_id: int) -> bool:
-        """Check if any route or route stop references this station."""
-        route_check = select(Route.id).where(
-            or_(
-                Route.origin_station_id == station_id,
-                Route.destination_station_id == station_id,
-            )
-        )
-        if self.db.scalar(route_check) is not None:
-            return True
+        """Whether any route references this station.
 
-        stop_check = select(RouteStop.id).where(RouteStop.station_id == station_id)
-        return self.db.scalar(stop_check) is not None
+        Routes are no longer station-linked (they are containers of pickup
+        points), so stations are standalone resources and this is always
+        False; kept for API stability of the delete guard.
+        """
+        return False

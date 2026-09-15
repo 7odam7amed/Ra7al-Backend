@@ -1,17 +1,21 @@
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, CheckConstraint, Float, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import BaseModel
 
 if TYPE_CHECKING:
-    from app.models.route import Route
-    from app.models.route_stop import RouteStop
+    from app.models.pickup_point import PickupPoint
 
 
 class Station(BaseModel):
-    """Station/Bus stop database model representing physical pickup/dropoff locations."""
+    """Station/Bus stop database model representing physical locations.
+
+    Stations are standalone physical resources since the transportation
+    refactor: routes are containers of pickup points, not station chains, so
+    stations have no route relationships.
+    """
 
     __tablename__ = "stations"
     __table_args__ = (
@@ -34,22 +38,6 @@ class Station(BaseModel):
     longitude: Mapped[float] = mapped_column(Float, nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
-    )
-
-    # Relationships
-    origin_routes: Mapped[list["Route"]] = relationship(
-        "Route",
-        foreign_keys="[Route.origin_station_id]",
-        back_populates="origin_station",
-    )
-    destination_routes: Mapped[list["Route"]] = relationship(
-        "Route",
-        foreign_keys="[Route.destination_station_id]",
-        back_populates="destination_station",
-    )
-    route_stops: Mapped[list["RouteStop"]] = relationship(
-        "RouteStop",
-        back_populates="station",
     )
 
     def __repr__(self) -> str:

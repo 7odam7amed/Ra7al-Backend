@@ -60,8 +60,8 @@ def test_subscription_model_creation_and_relationships(db_session: Session) -> N
     assert sub.currency == "EGP"
     # Decoupled: a subscription carries NO route/trip/pickup-point selection.
     assert sub.route_id is None
-    assert sub.outbound_pickup_point_id is None
-    assert sub.return_pickup_point_id is None
+    assert not hasattr(sub, "outbound_pickup_point_id")
+    assert not hasattr(sub, "return_pickup_point_id")
     assert "Subscription" in repr(sub)
 
 

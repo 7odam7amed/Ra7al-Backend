@@ -1,32 +1,43 @@
 from datetime import datetime
-from decimal import Decimal
 import math
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.enums import TripStatus
+from app.models.enums import TripDirection, TripStatus
 from app.schemas.bus import BusResponse
-from app.schemas.pickup_point import (
-    PickupPointCreateRequest,
-    PickupPointResponse,
-)
+from app.schemas.pickup_point import PickupPointResponse
 from app.schemas.route import RouteResponse
+from app.schemas.trip_stop import TripStopCreateRequest, TripStopResponse
 from app.schemas.user import UserResponse
 
 
 class TripCreateRequest(BaseModel):
-    """Schema for scheduling a new trip (CEO only)."""
+    """Schema for scheduling a new trip (CEO only).
+
+    The CEO picks a route, then selects an ordered subset of that route's
+    pickup points with a scheduled departure time per stop. The trip-level
+    departure/arrival are derived from the first/last stop times, so a
+    ticket price and fixed destination do not exist here.
+    """
 
     route_id: int = Field(..., gt=0, description="Route ID", examples=[1])
+    direction: TripDirection = Field(
+        ...,
+        description="Trip direction: OUTBOUND (ذهاب) or RETURN (عودة)",
+        examples=[TripDirection.OUTBOUND],
+    )
     bus_id: int = Field(..., gt=0, description="Bus vehicle ID", examples=[2])
     supervisor_id: int = Field(
         ..., gt=0, description="Assigned Supervisor User ID", examples=[3]
     )
-    departure_time: datetime = Field(
-        ..., description="Scheduled departure timestamp with timezone"
-    )
-    estimated_arrival_time: datetime = Field(
-        ..., description="Estimated arrival timestamp with timezone"
+    stops: list[TripStopCreateRequest] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Ordered selected stops from the trip's route, each with a "
+            "scheduled departure time. First stop time becomes the trip's "
+            "departure_time; last stop time becomes estimated_arrival_time."
+        ),
     )
     passenger_capacity: int | None = Field(
         default=None,
@@ -35,62 +46,41 @@ class TripCreateRequest(BaseModel):
         description="Optional capacity override (defaults to bus capacity if not set)",
         examples=[45],
     )
-    fare_amount: Decimal = Field(
-        default=Decimal("50.00"),
-        gt=0,
-        description="Trip fare price in EGP",
-        examples=[Decimal("50.00")],
-    )
-    pickup_points: list[PickupPointCreateRequest] | None = Field(
-        default=None,
-        description="Optional list of gathering/pickup points for this trip",
+    allow_overbooking: bool = Field(
+        default=False,
+        description=(
+            "When False and capacity is reached, the trip becomes FULL for "
+            "new bookings. When True, extra bookings follow the existing "
+            "overbooking rules."
+        ),
     )
 
     @model_validator(mode="after")
-    def validate_time_order(self) -> "TripCreateRequest":
-        if self.estimated_arrival_time <= self.departure_time:
-            raise ValueError(
-                "estimated_arrival_time must be strictly after departure_time"
-            )
+    def validate_stop_orders(self) -> "TripCreateRequest":
+        orders = [s.stop_order for s in self.stops]
+        if len(orders) != len(set(orders)):
+            raise ValueError("Duplicate stop_order values are not allowed")
+        point_ids = [s.pickup_point_id for s in self.stops]
+        if len(point_ids) != len(set(point_ids)):
+            raise ValueError("Duplicate pickup points in stops are not allowed")
         return self
 
 
 class TripUpdateRequest(BaseModel):
     """Schema for updating trip details (CEO only)."""
 
-    route_id: int | None = Field(
-        default=None, gt=0, description="New Route ID", examples=[1]
-    )
     bus_id: int | None = Field(
         default=None, gt=0, description="New Bus ID", examples=[2]
     )
     supervisor_id: int | None = Field(
         default=None, gt=0, description="New Supervisor User ID", examples=[3]
     )
-    departure_time: datetime | None = Field(
-        default=None, description="New departure timestamp"
-    )
-    estimated_arrival_time: datetime | None = Field(
-        default=None, description="New arrival timestamp"
-    )
     passenger_capacity: int | None = Field(
         default=None, gt=0, le=150, description="New passenger capacity"
     )
-    fare_amount: Decimal | None = Field(
-        default=None, gt=0, description="New trip fare price in EGP"
+    allow_overbooking: bool | None = Field(
+        default=None, description="New overbooking allowance"
     )
-
-    @model_validator(mode="after")
-    def validate_time_order(self) -> "TripUpdateRequest":
-        if (
-            self.departure_time is not None
-            and self.estimated_arrival_time is not None
-            and self.estimated_arrival_time <= self.departure_time
-        ):
-            raise ValueError(
-                "estimated_arrival_time must be strictly after departure_time"
-            )
-        return self
 
 
 class TripStatusUpdateRequest(BaseModel):
@@ -108,20 +98,23 @@ class TripResponse(BaseModel):
 
     id: int
     route_id: int
+    direction: TripDirection
     bus_id: int
     supervisor_id: int
     departure_time: datetime
     estimated_arrival_time: datetime
     status: TripStatus
     passenger_capacity: int
-    fare_amount: Decimal = Decimal("50.00")
+    allow_overbooking: bool = False
     created_at: datetime
     updated_at: datetime
     route: RouteResponse | None = None
     bus: BusResponse | None = None
     supervisor: UserResponse | None = None
+    # Ordered selected stops (with per-stop departure times).
+    trip_stops: list[TripStopResponse] = []
+    # Backward-compatible convenience view of the trip's points.
     pickup_points: list[PickupPointResponse] = []
-
 
 
 class PaginatedTripResponse(BaseModel):

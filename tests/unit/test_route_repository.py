@@ -1,65 +1,43 @@
 from sqlalchemy.orm import Session
 
-from app.models.station import Station
+from app.models.pickup_point import PickupPoint
 from app.repositories.route_repository import RouteRepository
 
 
-def _create_stations(db_session: Session) -> tuple[Station, Station, Station]:
-    s1 = Station(name="Origin", code="ST-ORIGIN", latitude=30.0, longitude=31.0)
-    s2 = Station(name="Destination", code="ST-DEST", latitude=30.1, longitude=31.1)
-    s3 = Station(name="Third", code="ST-THIRD", latitude=30.2, longitude=31.2)
-    db_session.add_all([s1, s2, s3])
-    db_session.commit()
-    return s1, s2, s3
-
-
 def test_route_repository_create_and_get(db_session: Session) -> None:
-    s1, s2, _ = _create_stations(db_session)
     repo = RouteRepository(db_session)
 
     route = repo.create(
-        route_number="R-101",
         name="Campus Express",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=15.0,
-        estimated_duration_minutes=35,
-        supervisor_id=None,
         is_active=True,
     )
 
     assert route.id is not None
-    assert route.route_number == "R-101"
     assert route.name == "Campus Express"
-    assert route.distance_km == 15.0
-    assert route.estimated_duration_minutes == 35
     assert route.is_active is True
 
     # Get by ID
     fetched = repo.get_by_id(route.id)
     assert fetched is not None
     assert fetched.id == route.id
-    assert fetched.origin_station.id == s1.id
-    assert fetched.destination_station.id == s2.id
 
-    # Get by route_number
-    by_num = repo.get_by_route_number("r-101")
-    assert by_num is not None
-    assert by_num.id == route.id
+    # Get by name
+    by_name = repo.get_by_name("Campus Express")
+    assert by_name is not None
+    assert by_name.id == route.id
 
     # Exists check
-    assert repo.exists_by_route_number("R-101") is True
-    assert repo.exists_by_route_number("r-101") is True
-    assert repo.exists_by_route_number("R-999") is False
-    assert repo.exists_by_route_number("R-101", exclude_id=route.id) is False
+    assert repo.exists_by_name("Campus Express") is True
+    assert repo.exists_by_name("campus express") is False  # exact match only
+    assert repo.exists_by_name("Route 999") is False
+    assert repo.exists_by_name("Campus Express", exclude_id=route.id) is False
 
 
 def test_route_repository_list_and_search(db_session: Session) -> None:
-    s1, s2, s3 = _create_stations(db_session)
     repo = RouteRepository(db_session)
 
-    r1 = repo.create("R-A", "Alpha Line", s1.id, s2.id, 10.0, 20, is_active=True)
-    r2 = repo.create("R-B", "Beta Line", s1.id, s3.id, 15.0, 30, is_active=False)
+    r1 = repo.create("Alpha Line", is_active=True)
+    r2 = repo.create("Beta Line", is_active=False)
 
     # List all
     routes, total = repo.list(page=1, page_size=10)
@@ -78,28 +56,34 @@ def test_route_repository_list_and_search(db_session: Session) -> None:
 
 
 def test_route_repository_update_and_delete(db_session: Session) -> None:
-    s1, s2, s3 = _create_stations(db_session)
     repo = RouteRepository(db_session)
 
-    route = repo.create("R-OLD", "Old Route", s1.id, s2.id, 10.0, 20)
+    route = repo.create("Old Route")
 
     updated = repo.update(
         route=route,
-        route_number="R-NEW",
         name="New Route",
-        origin_station_id=s2.id,
-        destination_station_id=s3.id,
-        distance_km=25.0,
-        estimated_duration_minutes=50,
         is_active=False,
     )
-    assert updated.route_number == "R-NEW"
     assert updated.name == "New Route"
-    assert updated.origin_station_id == s2.id
-    assert updated.destination_station_id == s3.id
-    assert updated.distance_km == 25.0
-    assert updated.estimated_duration_minutes == 50
     assert updated.is_active is False
 
     repo.delete(route)
     assert repo.get_by_id(route.id) is None
+
+
+def test_route_repository_points_loaded_with_route(db_session: Session) -> None:
+    """Route is a container of pickup points; points are eager-loaded."""
+    repo = RouteRepository(db_session)
+    route = repo.create("Container Route")
+
+    from app.repositories.pickup_point_repository import PickupPointRepository
+
+    point_repo = PickupPointRepository(db_session)
+    p1 = point_repo.create(route_id=route.id, name="Point A", sequence=1)
+    p2 = point_repo.create(route_id=route.id, name="Point B", sequence=2)
+
+    fetched = repo.get_by_id(route.id)
+    assert fetched is not None
+    point_ids = [p.id for p in fetched.pickup_points]
+    assert point_ids == [p1.id, p2.id]

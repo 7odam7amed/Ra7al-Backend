@@ -1,28 +1,31 @@
-from datetime import datetime
-from decimal import Decimal
-
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, selectinload
 
-from app.models.enums import TripStatus
+from app.models.enums import TripDirection, TripStatus
+from app.models.route import Route
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 
 
 class TripRepository:
-    """Repository handling database operations and conflict queries for Trip scheduling."""
+    """Repository handling database operations and conflict queries for trips."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def _base_stmt(self):
+        return select(Trip).options(
+            selectinload(Trip.trip_stops).selectinload(TripStop.pickup_point),
+            selectinload(Trip.route).selectinload(Route.pickup_points),
+        )
+
     def get_by_id(self, trip_id: int) -> Trip | None:
-        """Fetch a single trip with route, bus, supervisor, and pickup points loaded."""
+        """Fetch a single trip with route, bus, supervisor, and ordered stops loaded."""
         stmt = (
             select(Trip)
             .options(
-                joinedload(Trip.route),
-                joinedload(Trip.bus),
-                joinedload(Trip.supervisor),
-                selectinload(Trip.pickup_points),
+                selectinload(Trip.trip_stops).selectinload(TripStop.pickup_point),
+                selectinload(Trip.route).selectinload(Route.pickup_points),
             )
             .where(Trip.id == trip_id)
         )
@@ -36,19 +39,12 @@ class TripRepository:
         route_id: int | None = None,
         bus_id: int | None = None,
         supervisor_id: int | None = None,
-        departure_after: datetime | None = None,
-        departure_before: datetime | None = None,
+        direction: TripDirection | None = None,
+        departure_after=None,
+        departure_before=None,
     ) -> tuple[list[Trip], int]:
         """List trips with pagination and multi-field filters."""
-        stmt = (
-            select(Trip)
-            .options(
-                joinedload(Trip.route),
-                joinedload(Trip.bus),
-                joinedload(Trip.supervisor),
-                selectinload(Trip.pickup_points),
-            )
-        )
+        stmt = self._base_stmt()
         count_stmt = select(func.count(Trip.id))
 
         if status is not None:
@@ -66,6 +62,10 @@ class TripRepository:
         if supervisor_id is not None:
             stmt = stmt.where(Trip.supervisor_id == supervisor_id)
             count_stmt = count_stmt.where(Trip.supervisor_id == supervisor_id)
+
+        if direction is not None:
+            stmt = stmt.where(Trip.direction == direction)
+            count_stmt = count_stmt.where(Trip.direction == direction)
 
         if departure_after is not None:
             stmt = stmt.where(Trip.departure_time >= departure_after)
@@ -90,11 +90,11 @@ class TripRepository:
     def find_bus_conflict(
         self,
         bus_id: int,
-        departure_time: datetime,
-        estimated_arrival_time: datetime,
+        departure_time,
+        estimated_arrival_time,
         exclude_trip_id: int | None = None,
-    ) -> Trip | None:
-        """Query for any active (SCHEDULED/IN_PROGRESS) trip assigned to the bus overlapping the time interval."""
+    ):
+        """Any active trip assigned to the bus overlapping the time interval."""
         stmt = select(Trip).where(
             Trip.bus_id == bus_id,
             Trip.status.in_([TripStatus.SCHEDULED, TripStatus.IN_PROGRESS]),
@@ -108,11 +108,11 @@ class TripRepository:
     def find_supervisor_conflict(
         self,
         supervisor_id: int,
-        departure_time: datetime,
-        estimated_arrival_time: datetime,
+        departure_time,
+        estimated_arrival_time,
         exclude_trip_id: int | None = None,
-    ) -> Trip | None:
-        """Query for any active (SCHEDULED/IN_PROGRESS) trip assigned to the supervisor overlapping the time interval."""
+    ):
+        """Any active trip assigned to the supervisor overlapping the time interval."""
         stmt = select(Trip).where(
             Trip.supervisor_id == supervisor_id,
             Trip.status.in_([TripStatus.SCHEDULED, TripStatus.IN_PROGRESS]),
@@ -126,7 +126,7 @@ class TripRepository:
     def supervisor_is_assigned_to_route(
         self, supervisor_id: int, route_id: int
     ) -> bool:
-        """Return whether a supervisor has an assignment on the specified route."""
+        """Whether a supervisor has an assignment on the specified route."""
         stmt = select(func.count(Trip.id)).where(
             Trip.supervisor_id == supervisor_id,
             Trip.route_id == route_id,
@@ -134,14 +134,14 @@ class TripRepository:
         return (self.db.scalar(stmt) or 0) > 0
 
     def supervisor_has_any_trip(self, supervisor_id: int) -> bool:
-        """Return whether the supervisor is assigned to at least one trip."""
+        """Whether the supervisor is assigned to at least one trip."""
         stmt = select(func.count(Trip.id)).where(
             Trip.supervisor_id == supervisor_id,
         )
         return (self.db.scalar(stmt) or 0) > 0
 
     def supervisor_has_trip_on_bus(self, supervisor_id: int, bus_id: int) -> bool:
-        """Return whether the supervisor is assigned to any trip using the specified bus."""
+        """Whether the supervisor is assigned to any trip using the specified bus."""
         stmt = select(func.count(Trip.id)).where(
             Trip.supervisor_id == supervisor_id,
             Trip.bus_id == bus_id,
@@ -151,23 +151,25 @@ class TripRepository:
     def create(
         self,
         route_id: int,
+        direction: TripDirection,
         bus_id: int,
         supervisor_id: int,
-        departure_time: datetime,
-        estimated_arrival_time: datetime,
+        departure_time,
+        estimated_arrival_time,
         passenger_capacity: int,
-        fare_amount: Decimal = Decimal("50.00"),
+        allow_overbooking: bool = False,
         status: TripStatus = TripStatus.SCHEDULED,
     ) -> Trip:
-        """Persist a new scheduled trip in the database."""
+        """Persist a new scheduled trip."""
         trip = Trip(
             route_id=route_id,
+            direction=direction,
             bus_id=bus_id,
             supervisor_id=supervisor_id,
             departure_time=departure_time,
             estimated_arrival_time=estimated_arrival_time,
             passenger_capacity=passenger_capacity,
-            fare_amount=fare_amount,
+            allow_overbooking=allow_overbooking,
             status=status,
         )
         self.db.add(trip)
@@ -178,30 +180,27 @@ class TripRepository:
     def update(
         self,
         trip: Trip,
-        route_id: int | None = None,
         bus_id: int | None = None,
         supervisor_id: int | None = None,
-        departure_time: datetime | None = None,
-        estimated_arrival_time: datetime | None = None,
         passenger_capacity: int | None = None,
-        fare_amount: Decimal | None = None,
+        allow_overbooking: bool | None = None,
+        departure_time=None,
+        estimated_arrival_time=None,
         status: TripStatus | None = None,
     ) -> Trip:
         """Update fields on an existing trip."""
-        if route_id is not None:
-            trip.route_id = route_id
         if bus_id is not None:
             trip.bus_id = bus_id
         if supervisor_id is not None:
             trip.supervisor_id = supervisor_id
+        if passenger_capacity is not None:
+            trip.passenger_capacity = passenger_capacity
+        if allow_overbooking is not None:
+            trip.allow_overbooking = allow_overbooking
         if departure_time is not None:
             trip.departure_time = departure_time
         if estimated_arrival_time is not None:
             trip.estimated_arrival_time = estimated_arrival_time
-        if passenger_capacity is not None:
-            trip.passenger_capacity = passenger_capacity
-        if fare_amount is not None:
-            trip.fare_amount = fare_amount
         if status is not None:
             trip.status = status
 

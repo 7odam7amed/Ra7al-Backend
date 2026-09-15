@@ -50,6 +50,7 @@ MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 DEFAULT_UPLOAD_DIR = Path("uploads/id_cards")
 DEFAULT_BUCKET_NAME = "id-cards"
 DEFAULT_BUS_IMAGES_BUCKET_NAME = "bus-images"
+DEFAULT_PAYMENT_RECEIPTS_BUCKET_NAME = "payment-receipts"
 
 MEDIA_TYPE_MAP = {
     ".png": "image/png",
@@ -65,6 +66,13 @@ MEDIA_TYPE_MAP = {
 UPLOAD_NAMESPACES = {
     "id_cards": {"local_dir": "id_cards", "object_prefix": "id_cards"},
     "bus_images": {"local_dir": "bus_images", "object_prefix": "bus_images"},
+    # Payment receipts live in a DEDICATED private bucket in production
+    # (payment-receipts) and are only reachable through authorized backend
+    # flows — never via public object URLs.
+    "payment_receipts": {
+        "local_dir": "payment_receipts",
+        "object_prefix": "payment_receipts",
+    },
 }
 DEFAULT_NAMESPACE = "id_cards"
 
@@ -427,6 +435,10 @@ class SupabaseStorageService(StorageService):
         self.bus_images_bucket_name = (
             settings.SUPABASE_BUS_IMAGES_BUCKET or DEFAULT_BUS_IMAGES_BUCKET_NAME
         )
+        self.payment_receipts_bucket_name = (
+            settings.SUPABASE_PAYMENT_RECEIPTS_BUCKET
+            or DEFAULT_PAYMENT_RECEIPTS_BUCKET_NAME
+        )
 
         if not self.supabase_url or not self.service_role_key:
             raise ValueError(
@@ -440,10 +452,13 @@ class SupabaseStorageService(StorageService):
 
         Bus images MUST be stored in the dedicated bus-images bucket (not the
         ID-card bucket), and every read/delete/sign operation must resolve the
-        same bucket the object was written to.
+        same bucket the object was written to. Payment receipts likewise live
+        in their own private payment-receipts bucket.
         """
         if namespace == "bus_images":
             return self.bus_images_bucket_name
+        if namespace == "payment_receipts":
+            return self.payment_receipts_bucket_name
         return self.bucket_name
 
     def _get_headers(self, content_type: str | None = None) -> dict[str, str]:

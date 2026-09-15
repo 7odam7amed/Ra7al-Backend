@@ -2055,8 +2055,8 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Create a new bus route (CEO & Supervisor)",
-        "description": "Create a new route between origin and destination stations.",
+        "summary": "Create a new route (CEO only)",
+        "description": "Create a new route container (a named group of pickup points).",
         "operationId": "create_route_api_v1_routes_post",
         "security": [
           {
@@ -2100,8 +2100,8 @@
         "tags": [
           "Routes"
         ],
-        "summary": "List routes with pagination and filters (CEO, Supervisor & Student read-only)",
-        "description": "Retrieve a paginated list of routes.",
+        "summary": "List routes with pagination and filters (any authenticated role)",
+        "description": "Retrieve a paginated list of routes with their pickup points.",
         "operationId": "list_routes_api_v1_routes_get",
         "security": [
           {
@@ -2155,24 +2155,6 @@
             "description": "Filter by active status"
           },
           {
-            "name": "supervisor_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Filter by assigned supervisor",
-              "title": "Supervisor Id"
-            },
-            "description": "Filter by assigned supervisor"
-          },
-          {
             "name": "search",
             "in": "query",
             "required": false,
@@ -2185,10 +2167,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Search by route number or name",
+              "description": "Search by route name",
               "title": "Search"
             },
-            "description": "Search by route number or name"
+            "description": "Search by route name"
           }
         ],
         "responses": {
@@ -2220,8 +2202,8 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Get route details by ID (CEO, Supervisor & Student read-only)",
-        "description": "Retrieve full details of a specific route including origin, destination, and ordered stops.",
+        "summary": "Get route details by ID (any authenticated role)",
+        "description": "Retrieve full details of a specific route including its pickup points.",
         "operationId": "get_route_by_id_api_v1_routes__route_id__get",
         "security": [
           {
@@ -2266,7 +2248,7 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Update route details (CEO & Supervisor)",
+        "summary": "Update route details (CEO only)",
         "description": "Update editable fields of a route.",
         "operationId": "update_route_api_v1_routes__route_id__patch",
         "security": [
@@ -2322,8 +2304,8 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Delete a route (CEO & Supervisor)",
-        "description": "Delete a route and cascade-delete all its intermediate stops.",
+        "summary": "Delete a route (CEO only)",
+        "description": "Delete a route and cascade-delete its pickup points.",
         "operationId": "delete_route_api_v1_routes__route_id__delete",
         "security": [
           {
@@ -2363,7 +2345,7 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Update route operational status (CEO & Supervisor)",
+        "summary": "Update route operational status (CEO only)",
         "description": "Activate or deactivate a route.",
         "operationId": "update_route_status_api_v1_routes__route_id__status_patch",
         "security": [
@@ -2416,14 +2398,14 @@
         }
       }
     },
-    "/api/v1/routes/{route_id}/supervisor": {
-      "patch": {
+    "/api/v1/routes/{route_id}/pickup-points": {
+      "post": {
         "tags": [
           "Routes"
         ],
-        "summary": "Assign or reassign supervisor to route (CEO & Supervisor)",
-        "description": "Assign or unassign a supervisor for a route.",
-        "operationId": "assign_supervisor_api_v1_routes__route_id__supervisor_patch",
+        "summary": "Add a pickup point to a route (CEO only)",
+        "description": "Register a new pickup point under this route (one route per point).",
+        "operationId": "add_route_pickup_point_api_v1_routes__route_id__pickup_points_post",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -2445,70 +2427,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RouteSupervisorUpdateRequest"
+                "$ref": "#/components/schemas/PickupPointCreateRequest"
               }
             }
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/routes/{route_id}/stops": {
-      "get": {
-        "tags": [
-          "Routes"
-        ],
-        "summary": "List ordered intermediate stops for a route (CEO, Supervisor & Student read-only)",
-        "description": "Retrieve all intermediate stops configured for a route in sequential order.",
-        "operationId": "get_route_stops_api_v1_routes__route_id__stops_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "route_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Route Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/RouteStopResponse"
-                  },
-                  "title": "Response Get Route Stops Api V1 Routes  Route Id  Stops Get"
+                  "$ref": "#/components/schemas/PickupPointResponse"
                 }
               }
             }
@@ -2525,13 +2455,13 @@
           }
         }
       },
-      "post": {
+      "get": {
         "tags": [
           "Routes"
         ],
-        "summary": "Add an intermediate stop to a route (CEO & Supervisor)",
-        "description": "Add a new stop station and sequential order number to a route.",
-        "operationId": "add_route_stop_api_v1_routes__route_id__stops_post",
+        "summary": "List a route's pickup points (any authenticated role)",
+        "description": "Retrieve the points registered under a route in order.",
+        "operationId": "list_route_pickup_points_api_v1_routes__route_id__pickup_points_get",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -2548,74 +2478,6 @@
             }
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RouteStopCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RouteStopResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/routes/{route_id}/stops/reorder": {
-      "patch": {
-        "tags": [
-          "Routes"
-        ],
-        "summary": "Batch reorder stops on a route (CEO & Supervisor)",
-        "description": "Atomically update sequential stop order indices for multiple stops on a route.",
-        "operationId": "reorder_route_stops_api_v1_routes__route_id__stops_reorder_patch",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "route_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Route Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RouteStopReorderRequest"
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -2624,9 +2486,9 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/RouteStopResponse"
+                    "$ref": "#/components/schemas/PickupPointResponse"
                   },
-                  "title": "Response Reorder Route Stops Api V1 Routes  Route Id  Stops Reorder Patch"
+                  "title": "Response List Route Pickup Points Api V1 Routes  Route Id  Pickup Points Get"
                 }
               }
             }
@@ -2644,14 +2506,14 @@
         }
       }
     },
-    "/api/v1/routes/{route_id}/stops/{route_stop_id}": {
+    "/api/v1/routes/{route_id}/pickup-points/{point_id}": {
       "patch": {
         "tags": [
           "Routes"
         ],
-        "summary": "Update single route stop sequence (CEO & Supervisor)",
-        "description": "Update the sequence order of a single route stop.",
-        "operationId": "update_route_stop_api_v1_routes__route_id__stops__route_stop_id__patch",
+        "summary": "Update a route pickup point (CEO only)",
+        "description": "Update name, address, or sequence of a route's pickup point.",
+        "operationId": "update_route_pickup_point_api_v1_routes__route_id__pickup_points__point_id__patch",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -2668,12 +2530,12 @@
             }
           },
           {
-            "name": "route_stop_id",
+            "name": "point_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Route Stop Id"
+              "title": "Point Id"
             }
           }
         ],
@@ -2682,7 +2544,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RouteStopUpdateRequest"
+                "$ref": "#/components/schemas/PickupPointUpdateRequest"
               }
             }
           }
@@ -2693,7 +2555,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RouteStopResponse"
+                  "$ref": "#/components/schemas/PickupPointResponse"
                 }
               }
             }
@@ -2714,9 +2576,9 @@
         "tags": [
           "Routes"
         ],
-        "summary": "Remove a stop from a route (CEO & Supervisor)",
-        "description": "Remove an intermediate stop from a route.",
-        "operationId": "remove_route_stop_api_v1_routes__route_id__stops__route_stop_id__delete",
+        "summary": "Delete a route pickup point (CEO only)",
+        "description": "Delete a pickup point (blocked when referenced by trips or bookings).",
+        "operationId": "delete_route_pickup_point_api_v1_routes__route_id__pickup_points__point_id__delete",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -2733,12 +2595,12 @@
             }
           },
           {
-            "name": "route_stop_id",
+            "name": "point_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Route Stop Id"
+              "title": "Point Id"
             }
           }
         ],
@@ -2764,8 +2626,8 @@
         "tags": [
           "Trips"
         ],
-        "summary": "Schedule a new trip (CEO only)",
-        "description": "Schedule a new trip on a route with an assigned bus and supervisor.",
+        "summary": "Schedule a new OUTBOUND or RETURN trip (CEO only)",
+        "description": "Create a directed trip: pick a route, then an ordered subset of that\nroute's pickup points with a departure time per stop. The trip-level\ndeparture/arrival are derived from the first/last stop times.",
         "operationId": "create_trip_api_v1_trips_post",
         "security": [
           {
@@ -2809,8 +2671,8 @@
         "tags": [
           "Trips"
         ],
-        "summary": "List scheduled trips with pagination and multi-field filters (CEO & Supervisor)",
-        "description": "Retrieve a paginated list of scheduled trips.",
+        "summary": "List trips with pagination and multi-field filters (CEO & Supervisor)",
+        "description": "Retrieve a paginated list of trips.",
         "operationId": "list_trips_api_v1_trips_get",
         "security": [
           {
@@ -2918,6 +2780,24 @@
             "description": "Filter by supervisor user ID"
           },
           {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TripDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by direction (OUTBOUND/RETURN)",
+              "title": "Direction"
+            },
+            "description": "Filter by direction (OUTBOUND/RETURN)"
+          },
+          {
             "name": "departure_after",
             "in": "query",
             "required": false,
@@ -2954,6 +2834,72 @@
               "title": "Departure Before"
             },
             "description": "Filter trips departing at or before timestamp"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedTripResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/trips/history": {
+      "get": {
+        "tags": [
+          "Trips"
+        ],
+        "summary": "Completed trip history, scoped by role (CEO: all; Supervisor: assigned)",
+        "description": "Completed trips never appear in upcoming lists; they are stored and\nexposed here. CEO sees all completed trips; a supervisor only those\nassigned to them.",
+        "operationId": "get_trip_history_api_v1_trips_history_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Page Size"
+            },
+            "description": "Items per page"
           }
         ],
         "responses": {
@@ -3031,8 +2977,8 @@
         "tags": [
           "Trips"
         ],
-        "summary": "Update trip schedule, bus, supervisor, or capacity (CEO only)",
-        "description": "Update editable attributes of a scheduled trip.",
+        "summary": "Update trip bus, supervisor, capacity, or overbooking (CEO only)",
+        "description": "Update editable attributes of a scheduled trip (stop sequence is\nupdated via the dedicated stops endpoint).",
         "operationId": "update_trip_api_v1_trips__trip_id__patch",
         "security": [
           {
@@ -3123,6 +3069,118 @@
         }
       }
     },
+    "/api/v1/trips/{trip_id}/stops": {
+      "patch": {
+        "tags": [
+          "Trips"
+        ],
+        "summary": "Replace the trip's ordered stop sequence (CEO only)",
+        "description": "Replace the full ordered stop selection of a SCHEDULED trip. Every\npoint must belong to the trip's route; departure/arrival are re-derived.",
+        "operationId": "update_trip_stops_api_v1_trips__trip_id__stops_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "trip_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Trip Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TripStopCreateRequest"
+                },
+                "title": "Stops"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TripResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Trips"
+        ],
+        "summary": "List the trip's ordered stops with departure times (CEO & Supervisor)",
+        "description": "Retrieve the ordered selected stops of a trip.",
+        "operationId": "list_trip_stops_api_v1_trips__trip_id__stops_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "trip_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Trip Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TripStopResponse"
+                  },
+                  "title": "Response List Trip Stops Api V1 Trips  Trip Id  Stops Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/trips/{trip_id}/status": {
       "patch": {
         "tags": [
@@ -3181,70 +3239,14 @@
         }
       }
     },
-    "/api/v1/trips/{trip_id}/pickup-points": {
-      "post": {
-        "tags": [
-          "Trips"
-        ],
-        "summary": "Add a pickup/gathering point to a trip (CEO only)",
-        "description": "Add a gathering/pickup location to a scheduled trip.",
-        "operationId": "add_pickup_point_api_v1_trips__trip_id__pickup_points_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "trip_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Trip Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PickupPointCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PickupPointResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
+    "/api/v1/trips/route-points/{route_id}": {
       "get": {
         "tags": [
           "Trips"
         ],
-        "summary": "List all pickup/gathering points for a trip (CEO & Supervisor)",
-        "description": "Retrieve all gathering/pickup locations defined for a trip in sequential order.",
-        "operationId": "list_pickup_points_api_v1_trips__trip_id__pickup_points_get",
+        "summary": "Retrieve a route's pickup points for trip creation (CEO only)",
+        "description": "Step 2 of trip creation: after choosing a route, fetch its registered\npickup points so the CEO can select, order, and time them.",
+        "operationId": "get_route_points_for_trip_api_v1_trips_route_points__route_id__get",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -3252,12 +3254,12 @@
         ],
         "parameters": [
           {
-            "name": "trip_id",
+            "name": "route_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Trip Id"
+              "title": "Route Id"
             }
           }
         ],
@@ -3267,129 +3269,10 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/PickupPointResponse"
-                  },
-                  "title": "Response List Pickup Points Api V1 Trips  Trip Id  Pickup Points Get"
+                  "$ref": "#/components/schemas/RouteResponse"
                 }
               }
             }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/trips/{trip_id}/pickup-points/{point_id}": {
-      "patch": {
-        "tags": [
-          "Trips"
-        ],
-        "summary": "Update a pickup point (CEO only)",
-        "description": "Update name, address, or sequence of a pickup point.",
-        "operationId": "update_pickup_point_api_v1_trips__trip_id__pickup_points__point_id__patch",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "trip_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Trip Id"
-            }
-          },
-          {
-            "name": "point_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Point Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PickupPointUpdateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PickupPointResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Trips"
-        ],
-        "summary": "Delete a pickup point (CEO only)",
-        "description": "Delete a pickup point from a trip.",
-        "operationId": "delete_pickup_point_api_v1_trips__trip_id__pickup_points__point_id__delete",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "trip_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Trip Id"
-            }
-          },
-          {
-            "name": "point_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "title": "Point Id"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -3409,8 +3292,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Create a daily transportation selection (Student only)",
-        "description": "Select a trip plus outbound/return pickup points for a service date.\n\nRequires an ACTIVE subscription covering the requested date. The service\ndate defaults to TOMORROW when omitted and must be today or later. The\nsubscription's weekly usage-day limit (days_per_week_snapshot, Mon-Sun)\nis enforced server-side; trip and pickup points are validated against the\ntrip's route.",
+        "summary": "Book ONE directed trip for a service date (Student only)",
+        "description": "Create the student's booking on one OUTBOUND or RETURN trip.\n\nRequires an ACTIVE subscription covering the requested date. One OUTBOUND\nand one RETURN booking are allowed per service date. The selected point\nmust be one of the trip's stops. On OUTBOUND the student's registered\nuniversity is automatically the destination; on RETURN the selected point\nis the destination.",
         "operationId": "book_trip_api_v1_reservations_post",
         "security": [
           {
@@ -3454,8 +3337,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "List all daily selections with filters (CEO & Supervisor only)",
-        "description": "Retrieve all daily selections system-wide with comprehensive filtering.",
+        "summary": "List all bookings with filters (CEO & Supervisor only)",
+        "description": "Retrieve all bookings system-wide with comprehensive filtering.",
         "operationId": "list_admin_reservations_api_v1_reservations_get",
         "security": [
           {
@@ -3527,6 +3410,24 @@
             "description": "Filter by student ID"
           },
           {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BoardingDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by direction",
+              "title": "Direction"
+            },
+            "description": "Filter by direction"
+          },
+          {
             "name": "status",
             "in": "query",
             "required": false,
@@ -3558,10 +3459,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter selections on/after this service date",
+              "description": "Filter bookings on/after this service date",
               "title": "Service Date From"
             },
-            "description": "Filter selections on/after this service date"
+            "description": "Filter bookings on/after this service date"
           },
           {
             "name": "service_date_to",
@@ -3577,10 +3478,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter selections on/before this service date",
+              "description": "Filter bookings on/before this service date",
               "title": "Service Date To"
             },
-            "description": "Filter selections on/before this service date"
+            "description": "Filter bookings on/before this service date"
           },
           {
             "name": "booked_after",
@@ -3596,10 +3497,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter reservations booked at or after timestamp",
+              "description": "Filter bookings created at or after timestamp",
               "title": "Booked After"
             },
-            "description": "Filter reservations booked at or after timestamp"
+            "description": "Filter bookings created at or after timestamp"
           },
           {
             "name": "booked_before",
@@ -3615,10 +3516,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter reservations booked at or before timestamp",
+              "description": "Filter bookings created at or before timestamp",
               "title": "Booked Before"
             },
-            "description": "Filter reservations booked at or before timestamp"
+            "description": "Filter bookings created at or before timestamp"
           }
         ],
         "responses": {
@@ -3645,86 +3546,14 @@
         }
       }
     },
-    "/api/v1/reservations/my/tomorrow": {
+    "/api/v1/reservations/upcoming-trips": {
       "get": {
         "tags": [
           "Reservations"
         ],
-        "summary": "Get TOMORROW's daily transportation selection (Student only)",
-        "description": "Retrieve the authenticated student's selection for tomorrow, if any.",
-        "operationId": "get_my_tomorrow_selection_api_v1_reservations_my_tomorrow_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReservationResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "Reservations"
-        ],
-        "summary": "Update TOMORROW's daily transportation selection (Student only)",
-        "description": "Replace the existing selection for the resolved service date.\n\n``service_date`` in the body defaults to TOMORROW when omitted.",
-        "operationId": "update_my_tomorrow_selection_api_v1_reservations_my_tomorrow_put",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReservationCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReservationResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
-      }
-    },
-    "/api/v1/reservations/available-trips": {
-      "get": {
-        "tags": [
-          "Reservations"
-        ],
-        "summary": "List trips available for TOMORROW's selection",
-        "description": "Retrieve tomorrow's scheduled trips with remaining available seating capacity.",
-        "operationId": "list_available_trips_api_v1_reservations_available_trips_get",
+        "summary": "All eligible upcoming trips with booking states (Student only)",
+        "description": "The student transportation screen (مواصلات الغد): ALL upcoming trips,\nnot just tomorrow's. Each trip shows direction, route, ordered stops,\ntimes, availability, and the student's booking state. Destinations are\ndynamic: OUTBOUND ends at the student's registered university; RETURN\nends at the drop-off point the student selects.",
+        "operationId": "list_upcoming_trips_api_v1_reservations_upcoming_trips_get",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -3759,22 +3588,22 @@
             "description": "Items per page"
           },
           {
-            "name": "route_id",
+            "name": "direction",
             "in": "query",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "integer"
+                  "$ref": "#/components/schemas/TripDirection"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Filter by route ID",
-              "title": "Route Id"
+              "description": "Filter by direction (OUTBOUND/RETURN)",
+              "title": "Direction"
             },
-            "description": "Filter by route ID"
+            "description": "Filter by direction (OUTBOUND/RETURN)"
           }
         ],
         "responses": {
@@ -3783,7 +3612,265 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PaginatedAvailableTripResponse"
+                  "$ref": "#/components/schemas/PaginatedStudentTripViewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reservations/trips/{trip_id}": {
+      "get": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Trip details for the student with dynamic destination (Student only)",
+        "description": "One trip's details from the student's perspective: origin/destination\nper direction, ordered stops with times, and the booking state.",
+        "operationId": "get_trip_for_student_api_v1_reservations_trips__trip_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "trip_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Trip Id"
+            }
+          },
+          {
+            "name": "service_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Service date for booking-state lookup (defaults to the trip's date)",
+              "title": "Service Date"
+            },
+            "description": "Service date for booking-state lookup (defaults to the trip's date)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudentTripViewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reservations/my/selection": {
+      "put": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Replace the student's booking for a date+direction (Student only)",
+        "description": "Replace the existing booking in the SAME direction as the new trip\nfor the resolved service date (direction comes from the trip).",
+        "operationId": "update_my_selection_api_v1_reservations_my_selection_put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReservationCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "The student's bookings for a date (Student only)",
+        "description": "Up to two bookings for the date: one OUTBOUND + one RETURN.",
+        "operationId": "get_my_selection_for_date_api_v1_reservations_my_selection_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to TOMORROW when omitted",
+              "title": "Service Date"
+            },
+            "description": "Defaults to TOMORROW when omitted"
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BoardingDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one direction",
+              "title": "Direction"
+            },
+            "description": "Filter to one direction"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReservationResponse"
+                  },
+                  "title": "Response Get My Selection For Date Api V1 Reservations My Selection Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/reservations/my/history": {
+      "get": {
+        "tags": [
+          "Reservations"
+        ],
+        "summary": "Completed trips the student participated in (Student only)",
+        "description": "Only completed trips the student booked; other students' history is\nnever accessible.",
+        "operationId": "get_my_trip_history_api_v1_reservations_my_history_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Page Size"
+            },
+            "description": "Items per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedReservationResponse"
                 }
               }
             }
@@ -3806,8 +3893,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "List authenticated student's daily selections (Student only)",
-        "description": "Retrieve a paginated list of the logged-in student's daily selections.",
+        "summary": "List authenticated student's bookings (Student only)",
+        "description": "Retrieve a paginated list of the logged-in student's bookings.",
         "operationId": "list_my_reservations_api_v1_reservations_my_get",
         "security": [
           {
@@ -3861,6 +3948,24 @@
             "description": "Filter by reservation status"
           },
           {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BoardingDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by direction",
+              "title": "Direction"
+            },
+            "description": "Filter by direction"
+          },
+          {
             "name": "trip_id",
             "in": "query",
             "required": false,
@@ -3892,10 +3997,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter selections on/after this service date",
+              "description": "Filter bookings on/after this service date",
               "title": "Service Date From"
             },
-            "description": "Filter selections on/after this service date"
+            "description": "Filter bookings on/after this service date"
           },
           {
             "name": "service_date_to",
@@ -3911,10 +4016,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter selections on/before this service date",
+              "description": "Filter bookings on/before this service date",
               "title": "Service Date To"
             },
-            "description": "Filter selections on/before this service date"
+            "description": "Filter bookings on/before this service date"
           }
         ],
         "responses": {
@@ -3946,8 +4051,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Get daily selection details by ID (Student owner or CEO & Supervisor)",
-        "description": "Retrieve full details of a daily selection enforcing ownership and permissions.",
+        "summary": "Get booking details by ID (Student owner or CEO & Supervisor)",
+        "description": "Retrieve full details of a booking enforcing ownership and permissions.",
         "operationId": "get_reservation_by_id_api_v1_reservations__reservation_id__get",
         "security": [
           {
@@ -3994,8 +4099,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Cancel a daily selection (Student owner or CEO & Supervisor)",
-        "description": "Cancel an active daily selection and release the reserved seat.",
+        "summary": "Cancel a booking (Student owner or CEO & Supervisor)",
+        "description": "Cancel an active booking and release the reserved seat.",
         "operationId": "cancel_reservation_api_v1_reservations__reservation_id__cancel_patch",
         "security": [
           {
@@ -4242,6 +4347,108 @@
                 "schema": {
                   "$ref": "#/components/schemas/PaginatedPaymentResponse"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/{payment_id}/receipt": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Upload a payment receipt image (Student owner only)",
+        "description": "Attach the required receipt image to a digital payment request.\n\nDigital payments require BOTH a transaction/reference code and a receipt\nimage before verification. The image is stored in the PRIVATE\npayment-receipts bucket and is only reachable through authorized backend\nendpoints.",
+        "operationId": "upload_payment_receipt_api_v1_payments__payment_id__receipt_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Payment Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_payment_receipt_api_v1_payments__payment_id__receipt_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentReceiptResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "View a payment receipt image (owner student, or CEO & Supervisor for review)",
+        "description": "Stream a stored receipt image through an authorized backend flow.\n\nReceipt objects live in a private bucket and are never exposed as public\nURLs; access is re-checked on every request.",
+        "operationId": "get_payment_receipt_api_v1_payments__payment_id__receipt_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "payment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Payment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -5948,112 +6155,6 @@
   },
   "components": {
     "schemas": {
-      "AvailableTripResponse": {
-        "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
-          },
-          "route_id": {
-            "type": "integer",
-            "title": "Route Id"
-          },
-          "bus_id": {
-            "type": "integer",
-            "title": "Bus Id"
-          },
-          "supervisor_id": {
-            "type": "integer",
-            "title": "Supervisor Id"
-          },
-          "departure_time": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Departure Time"
-          },
-          "estimated_arrival_time": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Estimated Arrival Time"
-          },
-          "status": {
-            "$ref": "#/components/schemas/TripStatus"
-          },
-          "passenger_capacity": {
-            "type": "integer",
-            "title": "Passenger Capacity"
-          },
-          "confirmed_reservations_count": {
-            "type": "integer",
-            "title": "Confirmed Reservations Count"
-          },
-          "available_seats": {
-            "type": "integer",
-            "title": "Available Seats"
-          },
-          "fare_amount": {
-            "type": "string",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Fare Amount",
-            "default": "50.00"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Updated At"
-          },
-          "route": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RouteResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "bus": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BusResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "pickup_points": {
-            "items": {
-              "$ref": "#/components/schemas/PickupPointResponse"
-            },
-            "type": "array",
-            "title": "Pickup Points",
-            "default": []
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "route_id",
-          "bus_id",
-          "supervisor_id",
-          "departure_time",
-          "estimated_arrival_time",
-          "status",
-          "passenger_capacity",
-          "confirmed_reservations_count",
-          "available_seats",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "AvailableTripResponse",
-        "description": "Representation of a trip available for TOMORROW's daily selection."
-      },
       "BoardingDirection": {
         "type": "string",
         "enum": [
@@ -6496,6 +6597,20 @@
         ],
         "title": "Body_upload_id_card_api_v1_auth_upload_id_card_post"
       },
+      "Body_upload_payment_receipt_api_v1_payments__payment_id__receipt_post": {
+        "properties": {
+          "image": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "Image"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image"
+        ],
+        "title": "Body_upload_payment_receipt_api_v1_payments__payment_id__receipt_post"
+      },
       "BusImageResponse": {
         "properties": {
           "bus_id": {
@@ -6859,43 +6974,6 @@
         ],
         "title": "HealthResponse"
       },
-      "PaginatedAvailableTripResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/AvailableTripResponse"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "total": {
-            "type": "integer",
-            "title": "Total"
-          },
-          "page": {
-            "type": "integer",
-            "title": "Page"
-          },
-          "page_size": {
-            "type": "integer",
-            "title": "Page Size"
-          },
-          "total_pages": {
-            "type": "integer",
-            "title": "Total Pages"
-          }
-        },
-        "type": "object",
-        "required": [
-          "items",
-          "total",
-          "page",
-          "page_size",
-          "total_pages"
-        ],
-        "title": "PaginatedAvailableTripResponse",
-        "description": "Paginated list of available trips."
-      },
       "PaginatedBoardingRecordResponse": {
         "properties": {
           "items": {
@@ -7117,6 +7195,43 @@
         ],
         "title": "PaginatedStationResponse",
         "description": "Paginated list of station records."
+      },
+      "PaginatedStudentTripViewResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StudentTripViewResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "total_pages": {
+            "type": "integer",
+            "title": "Total Pages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "PaginatedStudentTripViewResponse",
+        "description": "Paginated list of student-facing upcoming trips (all eligible, not just tomorrow)."
       },
       "PaginatedSubscriptionPlanResponse": {
         "properties": {
@@ -7372,6 +7487,34 @@
         "title": "PaymentMethod",
         "description": "Supported payment methods."
       },
+      "PaymentReceiptResponse": {
+        "properties": {
+          "payment_id": {
+            "type": "integer",
+            "title": "Payment Id"
+          },
+          "receipt_image_path": {
+            "type": "string",
+            "title": "Receipt Image Path"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Payment receipt uploaded successfully"
+          }
+        },
+        "type": "object",
+        "required": [
+          "payment_id",
+          "receipt_image_path",
+          "status"
+        ],
+        "title": "PaymentReceiptResponse",
+        "description": "Result of attaching a payment receipt image to a payment."
+      },
       "PaymentRejectRequest": {
         "properties": {
           "rejection_reason": {
@@ -7463,6 +7606,17 @@
               }
             ],
             "title": "Notes"
+          },
+          "receipt_image_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Image Path"
           },
           "paid_at": {
             "anyOf": [
@@ -7604,14 +7758,30 @@
       },
       "PickupPointCreateRequest": {
         "properties": {
+          "route_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route Id",
+            "description": "Route that owns this pickup point (one route only)",
+            "examples": [
+              1
+            ]
+          },
           "name": {
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
             "title": "Name",
-            "description": "Name of the gathering/pickup location",
+            "description": "Name of the pickup/drop-off location",
             "examples": [
-              "Cairo University Gate 3"
+              "Al-Mahatta"
             ]
           },
           "address": {
@@ -7634,7 +7804,8 @@
             "type": "integer",
             "minimum": 1.0,
             "title": "Sequence",
-            "description": "Sequence order of the pickup point along the route",
+            "description": "Default ordering hint within the route's points",
+            "default": 1,
             "examples": [
               1
             ]
@@ -7642,11 +7813,10 @@
         },
         "type": "object",
         "required": [
-          "name",
-          "sequence"
+          "name"
         ],
         "title": "PickupPointCreateRequest",
-        "description": "Schema for creating a pickup point on a trip."
+        "description": "Schema for creating a pickup point under a route.\n\n``route_id`` is optional in the payload: when the point is created through\nthe nested route endpoint (POST /routes/{route_id}/pickup-points) the\nowning route comes from the URL path and the body field is ignored."
       },
       "PickupPointResponse": {
         "properties": {
@@ -7654,9 +7824,9 @@
             "type": "integer",
             "title": "Id"
           },
-          "trip_id": {
+          "route_id": {
             "type": "integer",
-            "title": "Trip Id"
+            "title": "Route Id"
           },
           "name": {
             "type": "string",
@@ -7691,14 +7861,14 @@
         "type": "object",
         "required": [
           "id",
-          "trip_id",
+          "route_id",
           "name",
           "sequence",
           "created_at",
           "updated_at"
         ],
         "title": "PickupPointResponse",
-        "description": "Safe public representation of a pickup point."
+        "description": "Safe public representation of a route-owned pickup point.\n\nDeliberately carries NO latitude/longitude or trip_id: points are route\nresources, referenced by trips through ordered TripStop rows."
       },
       "PickupPointUpdateRequest": {
         "properties": {
@@ -7746,7 +7916,7 @@
               }
             ],
             "title": "Sequence",
-            "description": "Updated sequence order",
+            "description": "Updated ordering hint within the route",
             "examples": [
               2
             ]
@@ -7754,7 +7924,7 @@
         },
         "type": "object",
         "title": "PickupPointUpdateRequest",
-        "description": "Schema for updating a pickup point."
+        "description": "Schema for updating a pickup point (route ownership is immutable)."
       },
       "ReservationCreateRequest": {
         "properties": {
@@ -7762,9 +7932,18 @@
             "type": "integer",
             "exclusiveMinimum": 0.0,
             "title": "Trip Id",
-            "description": "Scheduled trip ID departing on the service date",
+            "description": "Scheduled trip ID (single direction) departing on the service date",
             "examples": [
               1
+            ]
+          },
+          "selected_pickup_point_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Selected Pickup Point Id",
+            "description": "The student's stop on this trip: pickup point for OUTBOUND, drop-off point for RETURN (must be one of the trip's stops)",
+            "examples": [
+              5
             ]
           },
           "service_date": {
@@ -7780,54 +7959,17 @@
             "title": "Service Date",
             "description": "Calendar date the student wants transportation (must be today or a future date within the subscription validity window). Defaults to TOMORROW when omitted.",
             "examples": [
-              "2026-09-16"
+              "2026-09-20"
             ]
-          },
-          "outbound_pickup_point_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Outbound Pickup Point Id",
-            "description": "Pickup point for the outbound journey (must belong to the trip)",
-            "examples": [
-              3
-            ]
-          },
-          "return_pickup_point_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Return Pickup Point Id",
-            "description": "Pickup point for the return journey (must belong to the trip)",
-            "examples": [
-              4
-            ]
-          },
-          "direction_mode": {
-            "type": "string",
-            "title": "Direction Mode",
-            "description": "Which journeys are needed: BOTH, OUTBOUND_ONLY, or RETURN_ONLY",
-            "default": "BOTH"
           }
         },
         "type": "object",
         "required": [
-          "trip_id"
+          "trip_id",
+          "selected_pickup_point_id"
         ],
         "title": "ReservationCreateRequest",
-        "description": "Schema for creating/updating a DAILY transportation selection.\n\n``service_date`` is OPTIONAL and defaults to TOMORROW (Today -> Tomorrow\nwindow) for backward compatibility. When supplied it must be a future\ndate (today or later); past dates are rejected server-side. The selected\ndate must fall inside the student's ACTIVE subscription validity window\nand respect the subscription's ``days_per_week_snapshot`` weekly usage\nlimit — both enforced by the service layer, never trusted from the client."
+        "description": "Create ONE directed booking for a service date.\n\n``service_date`` is OPTIONAL and defaults to TOMORROW. The selected point\nmust be one of the booked trip's stops. One OUTBOUND and one RETURN\nbooking are allowed per student per service date (enforced server-side)."
       },
       "ReservationResponse": {
         "properties": {
@@ -7852,32 +7994,22 @@
             "format": "date",
             "title": "Service Date"
           },
-          "outbound_pickup_point_id": {
+          "direction": {
+            "$ref": "#/components/schemas/BoardingDirection"
+          },
+          "selected_pickup_point_id": {
+            "type": "integer",
+            "title": "Selected Pickup Point Id"
+          },
+          "selected_pickup_point": {
             "anyOf": [
               {
-                "type": "integer"
+                "$ref": "#/components/schemas/PickupPointResponse"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Outbound Pickup Point Id"
-          },
-          "return_pickup_point_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Return Pickup Point Id"
-          },
-          "direction_mode": {
-            "type": "string",
-            "title": "Direction Mode",
-            "default": "BOTH"
+            ]
           },
           "status": {
             "$ref": "#/components/schemas/ReservationStatus"
@@ -7929,25 +8061,27 @@
               }
             ]
           },
-          "outbound_pickup_point": {
+          "origin": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/PickupPointResponse"
+                "type": "string"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Origin"
           },
-          "return_pickup_point": {
+          "destination": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/PickupPointResponse"
+                "type": "string"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Destination"
           }
         },
         "type": "object",
@@ -7957,13 +8091,15 @@
           "student_id",
           "subscription_id",
           "service_date",
+          "direction",
+          "selected_pickup_point_id",
           "status",
           "booked_at",
           "created_at",
           "updated_at"
         ],
         "title": "ReservationResponse",
-        "description": "Public representation of a daily transportation selection."
+        "description": "Public representation of one directed booking (تم الحجز)."
       },
       "ReservationStatus": {
         "type": "string",
@@ -7986,88 +8122,22 @@
       },
       "RouteCreateRequest": {
         "properties": {
-          "route_number": {
-            "type": "string",
-            "maxLength": 50,
-            "minLength": 1,
-            "title": "Route Number",
-            "examples": [
-              "R-101"
-            ]
-          },
           "name": {
             "type": "string",
             "maxLength": 100,
             "minLength": 1,
             "title": "Name",
             "examples": [
-              "Campus Express"
-            ]
-          },
-          "origin_station_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Origin Station Id",
-            "description": "Origin station primary ID",
-            "examples": [
-              1
-            ]
-          },
-          "destination_station_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Destination Station Id",
-            "description": "Destination station primary ID",
-            "examples": [
-              2
-            ]
-          },
-          "distance_km": {
-            "type": "number",
-            "exclusiveMinimum": 0.0,
-            "title": "Distance Km",
-            "description": "Route distance in kilometers (must be positive)",
-            "examples": [
-              15.5
-            ]
-          },
-          "estimated_duration_minutes": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Estimated Duration Minutes",
-            "description": "Estimated trip duration in minutes (must be positive)",
-            "examples": [
-              35
-            ]
-          },
-          "supervisor_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Supervisor Id",
-            "description": "Optional supervisor user ID assigned to route",
-            "examples": [
-              3
+              "Route A"
             ]
           }
         },
         "type": "object",
         "required": [
-          "route_number",
-          "name",
-          "origin_station_id",
-          "destination_station_id",
-          "distance_km",
-          "estimated_duration_minutes"
+          "name"
         ],
         "title": "RouteCreateRequest",
-        "description": "Schema for creating a new bus route."
+        "description": "Schema for creating a route (a named container of pickup points)."
       },
       "RouteResponse": {
         "properties": {
@@ -8075,44 +8145,13 @@
             "type": "integer",
             "title": "Id"
           },
-          "route_number": {
-            "type": "string",
-            "title": "Route Number"
-          },
           "name": {
             "type": "string",
             "title": "Name"
           },
-          "origin_station_id": {
-            "type": "integer",
-            "title": "Origin Station Id"
-          },
-          "destination_station_id": {
-            "type": "integer",
-            "title": "Destination Station Id"
-          },
-          "distance_km": {
-            "type": "number",
-            "title": "Distance Km"
-          },
-          "estimated_duration_minutes": {
-            "type": "integer",
-            "title": "Estimated Duration Minutes"
-          },
           "is_active": {
             "type": "boolean",
             "title": "Is Active"
-          },
-          "supervisor_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Supervisor Id"
           },
           "created_at": {
             "type": "string",
@@ -8124,51 +8163,25 @@
             "format": "date-time",
             "title": "Updated At"
           },
-          "origin_station": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StationResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "destination_station": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StationResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "stops": {
+          "pickup_points": {
             "items": {
-              "$ref": "#/components/schemas/RouteStopResponse"
+              "$ref": "#/components/schemas/PickupPointResponse"
             },
             "type": "array",
-            "title": "Stops",
+            "title": "Pickup Points",
             "default": []
           }
         },
         "type": "object",
         "required": [
           "id",
-          "route_number",
           "name",
-          "origin_station_id",
-          "destination_station_id",
-          "distance_km",
-          "estimated_duration_minutes",
           "is_active",
-          "supervisor_id",
           "created_at",
           "updated_at"
         ],
         "title": "RouteResponse",
-        "description": "Public representation of a route."
+        "description": "Public representation of a route: an ordered group of pickup points.\n\nDeliberately excludes origin/destination, distance, duration, and\nsupervisor: routes are logical containers only. Destinations are derived\nper student (outbound: student's university; return: selected drop-off)."
       },
       "RouteStatusUpdateRequest": {
         "properties": {
@@ -8188,186 +8201,8 @@
         "title": "RouteStatusUpdateRequest",
         "description": "Schema for updating route active status."
       },
-      "RouteStopCreateRequest": {
-        "properties": {
-          "station_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Station Id",
-            "description": "Station ID",
-            "examples": [
-              1
-            ]
-          },
-          "stop_order": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Stop Order",
-            "description": "Positive sequential stop order number",
-            "examples": [
-              1
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "station_id",
-          "stop_order"
-        ],
-        "title": "RouteStopCreateRequest",
-        "description": "Schema for adding an ordered stop to a route."
-      },
-      "RouteStopReorderItem": {
-        "properties": {
-          "route_stop_id": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Route Stop Id",
-            "examples": [
-              1
-            ]
-          },
-          "stop_order": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Stop Order",
-            "examples": [
-              1
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "route_stop_id",
-          "stop_order"
-        ],
-        "title": "RouteStopReorderItem",
-        "description": "Single item in a batch reorder operation."
-      },
-      "RouteStopReorderRequest": {
-        "properties": {
-          "stops": {
-            "items": {
-              "$ref": "#/components/schemas/RouteStopReorderItem"
-            },
-            "type": "array",
-            "minItems": 1,
-            "title": "Stops",
-            "description": "List of route stop order updates"
-          }
-        },
-        "type": "object",
-        "required": [
-          "stops"
-        ],
-        "title": "RouteStopReorderRequest",
-        "description": "Schema for batch reordering stops on a route."
-      },
-      "RouteStopResponse": {
-        "properties": {
-          "id": {
-            "type": "integer",
-            "title": "Id"
-          },
-          "route_id": {
-            "type": "integer",
-            "title": "Route Id"
-          },
-          "station_id": {
-            "type": "integer",
-            "title": "Station Id"
-          },
-          "stop_order": {
-            "type": "integer",
-            "title": "Stop Order"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "station": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StationResponse"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "route_id",
-          "station_id",
-          "stop_order",
-          "created_at"
-        ],
-        "title": "RouteStopResponse",
-        "description": "Safe representation of a route stop."
-      },
-      "RouteStopUpdateRequest": {
-        "properties": {
-          "stop_order": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Stop Order",
-            "description": "New positive sequential stop order number",
-            "examples": [
-              2
-            ]
-          }
-        },
-        "type": "object",
-        "required": [
-          "stop_order"
-        ],
-        "title": "RouteStopUpdateRequest",
-        "description": "Schema for updating a route stop order."
-      },
-      "RouteSupervisorUpdateRequest": {
-        "properties": {
-          "supervisor_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Supervisor Id",
-            "description": "Supervisor user ID or None to unassign",
-            "examples": [
-              5
-            ]
-          }
-        },
-        "type": "object",
-        "title": "RouteSupervisorUpdateRequest",
-        "description": "Schema for assigning or unassigning a route supervisor."
-      },
       "RouteUpdateRequest": {
         "properties": {
-          "route_number": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 50,
-                "minLength": 1
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Route Number",
-            "examples": [
-              "R-102"
-            ]
-          },
           "name": {
             "anyOf": [
               {
@@ -8382,81 +8217,6 @@
             "title": "Name",
             "examples": [
               "Updated Route Name"
-            ]
-          },
-          "origin_station_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Origin Station Id",
-            "examples": [
-              1
-            ]
-          },
-          "destination_station_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Destination Station Id",
-            "examples": [
-              2
-            ]
-          },
-          "distance_km": {
-            "anyOf": [
-              {
-                "type": "number",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Distance Km",
-            "examples": [
-              20.0
-            ]
-          },
-          "estimated_duration_minutes": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Estimated Duration Minutes",
-            "examples": [
-              45
-            ]
-          },
-          "supervisor_id": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Supervisor Id",
-            "examples": [
-              4
             ]
           }
         },
@@ -8698,6 +8458,145 @@
         "type": "object",
         "title": "StationUpdateRequest",
         "description": "Schema for updating station details."
+      },
+      "StudentTripViewResponse": {
+        "properties": {
+          "trip_id": {
+            "type": "integer",
+            "title": "Trip Id"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/TripDirection"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RouteResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin",
+            "description": "OUTBOUND: selected pickup point name. RETURN: student's university name."
+          },
+          "destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Destination",
+            "description": "OUTBOUND: student's registered university name. RETURN: the student's selected drop-off point name (null until booked)."
+          },
+          "selected_point_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Point Id",
+            "description": "The student's booked stop on this trip (null when not booked)"
+          },
+          "estimated_arrival_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Arrival Time"
+          },
+          "booking_state": {
+            "type": "string",
+            "title": "Booking State",
+            "description": "AVAILABLE, BOOKED, or FULL"
+          },
+          "departure_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Departure Time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TripStatus"
+          },
+          "passenger_capacity": {
+            "type": "integer",
+            "title": "Passenger Capacity"
+          },
+          "confirmed_reservations_count": {
+            "type": "integer",
+            "title": "Confirmed Reservations Count"
+          },
+          "available_seats": {
+            "type": "integer",
+            "title": "Available Seats"
+          },
+          "bus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stops": {
+            "items": {
+              "$ref": "#/components/schemas/TripStopResponse"
+            },
+            "type": "array",
+            "title": "Stops",
+            "description": "Ordered selected stops with per-stop departure times"
+          },
+          "pickup_points": {
+            "items": {
+              "$ref": "#/components/schemas/PickupPointResponse"
+            },
+            "type": "array",
+            "title": "Pickup Points",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "trip_id",
+          "direction",
+          "booking_state",
+          "status",
+          "passenger_capacity",
+          "confirmed_reservations_count",
+          "available_seats"
+        ],
+        "title": "StudentTripViewResponse",
+        "description": "Student-facing trip view with dynamic destination and booking state.\n\nDestination logic (never stored on the trip):\n  - OUTBOUND: origin = selected pickup point, destination = the student's\n    registered university (per-student; two students on the same trip can\n    see different destinations).\n  - RETURN: origin = the student's university, destination = the drop-off\n    point the student selects when booking."
       },
       "SubscriptionBoardingHistoryItem": {
         "properties": {
@@ -9511,10 +9410,21 @@
             "format": "date",
             "title": "Service Date"
           },
-          "direction_mode": {
+          "direction": {
             "type": "string",
-            "title": "Direction Mode",
-            "default": "BOTH"
+            "title": "Direction",
+            "default": "OUTBOUND"
+          },
+          "selected_point": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Point"
           },
           "payment_status": {
             "anyOf": [
@@ -9525,28 +9435,6 @@
                 "type": "null"
               }
             ]
-          },
-          "outbound_pickup": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Outbound Pickup"
-          },
-          "return_pickup": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Return Pickup"
           },
           "outbound_boarded": {
             "type": "boolean",
@@ -9580,7 +9468,7 @@
           "service_date"
         ],
         "title": "SupervisorTripStudentResponse",
-        "description": "Summary of a student's daily selection for a supervisor's assigned trip."
+        "description": "Summary of a student's directed booking for a supervisor's assigned trip."
       },
       "TokenResponse": {
         "properties": {
@@ -9614,6 +9502,13 @@
               1
             ]
           },
+          "direction": {
+            "$ref": "#/components/schemas/TripDirection",
+            "description": "Trip direction: OUTBOUND (ذهاب) or RETURN (عودة)",
+            "examples": [
+              "OUTBOUND"
+            ]
+          },
           "bus_id": {
             "type": "integer",
             "exclusiveMinimum": 0.0,
@@ -9632,17 +9527,14 @@
               3
             ]
           },
-          "departure_time": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Departure Time",
-            "description": "Scheduled departure timestamp with timezone"
-          },
-          "estimated_arrival_time": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Estimated Arrival Time",
-            "description": "Estimated arrival timestamp with timezone"
+          "stops": {
+            "items": {
+              "$ref": "#/components/schemas/TripStopCreateRequest"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Stops",
+            "description": "Ordered selected stops from the trip's route, each with a scheduled departure time. First stop time becomes the trip's departure_time; last stop time becomes estimated_arrival_time."
           },
           "passenger_capacity": {
             "anyOf": [
@@ -9661,50 +9553,32 @@
               45
             ]
           },
-          "fare_amount": {
-            "anyOf": [
-              {
-                "type": "number",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "string",
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
-              }
-            ],
-            "title": "Fare Amount",
-            "description": "Trip fare price in EGP",
-            "default": "50.00",
-            "examples": [
-              "50.00"
-            ]
-          },
-          "pickup_points": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/PickupPointCreateRequest"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pickup Points",
-            "description": "Optional list of gathering/pickup points for this trip"
+          "allow_overbooking": {
+            "type": "boolean",
+            "title": "Allow Overbooking",
+            "description": "When False and capacity is reached, the trip becomes FULL for new bookings. When True, extra bookings follow the existing overbooking rules.",
+            "default": false
           }
         },
         "type": "object",
         "required": [
           "route_id",
+          "direction",
           "bus_id",
           "supervisor_id",
-          "departure_time",
-          "estimated_arrival_time"
+          "stops"
         ],
         "title": "TripCreateRequest",
-        "description": "Schema for scheduling a new trip (CEO only)."
+        "description": "Schema for scheduling a new trip (CEO only).\n\nThe CEO picks a route, then selects an ordered subset of that route's\npickup points with a scheduled departure time per stop. The trip-level\ndeparture/arrival are derived from the first/last stop times, so a\nticket price and fixed destination do not exist here."
+      },
+      "TripDirection": {
+        "type": "string",
+        "enum": [
+          "OUTBOUND",
+          "RETURN"
+        ],
+        "title": "TripDirection",
+        "description": "Direction of a scheduled trip, chosen explicitly by the CEO.\n\nOUTBOUND (ذهاب): student's pickup point → the student's registered\nuniversity (per-student, never stored on the trip).\nRETURN (عودة): the university → the student's selected drop-off point."
       },
       "TripResponse": {
         "properties": {
@@ -9715,6 +9589,9 @@
           "route_id": {
             "type": "integer",
             "title": "Route Id"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/TripDirection"
           },
           "bus_id": {
             "type": "integer",
@@ -9741,11 +9618,10 @@
             "type": "integer",
             "title": "Passenger Capacity"
           },
-          "fare_amount": {
-            "type": "string",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Fare Amount",
-            "default": "50.00"
+          "allow_overbooking": {
+            "type": "boolean",
+            "title": "Allow Overbooking",
+            "default": false
           },
           "created_at": {
             "type": "string",
@@ -9787,6 +9663,14 @@
               }
             ]
           },
+          "trip_stops": {
+            "items": {
+              "$ref": "#/components/schemas/TripStopResponse"
+            },
+            "type": "array",
+            "title": "Trip Stops",
+            "default": []
+          },
           "pickup_points": {
             "items": {
               "$ref": "#/components/schemas/PickupPointResponse"
@@ -9800,6 +9684,7 @@
         "required": [
           "id",
           "route_id",
+          "direction",
           "bus_id",
           "supervisor_id",
           "departure_time",
@@ -9841,24 +9726,110 @@
         "title": "TripStatusUpdateRequest",
         "description": "Schema for transitioning trip status."
       },
-      "TripUpdateRequest": {
+      "TripStopCreateRequest": {
         "properties": {
-          "route_id": {
+          "pickup_point_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Pickup Point Id",
+            "description": "Pickup point ID (must belong to the trip's route)",
+            "examples": [
+              5
+            ]
+          },
+          "stop_order": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Stop Order",
+            "description": "Explicit visiting order of this stop on the trip",
+            "examples": [
+              1
+            ]
+          },
+          "departure_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Departure Time",
+            "description": "Scheduled departure datetime for this stop",
+            "examples": [
+              "2026-09-20T06:30:00Z"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "pickup_point_id",
+          "stop_order",
+          "departure_time"
+        ],
+        "title": "TripStopCreateRequest",
+        "description": "One selected stop when creating/updating a trip's stop sequence."
+      },
+      "TripStopResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "trip_id": {
+            "type": "integer",
+            "title": "Trip Id"
+          },
+          "pickup_point_id": {
+            "type": "integer",
+            "title": "Pickup Point Id"
+          },
+          "stop_order": {
+            "type": "integer",
+            "title": "Stop Order"
+          },
+          "departure_time": {
             "anyOf": [
               {
-                "type": "integer",
-                "exclusiveMinimum": 0.0
+                "type": "string",
+                "format": "date-time"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Route Id",
-            "description": "New Route ID",
-            "examples": [
-              1
-            ]
+            "title": "Departure Time"
           },
+          "point_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Point Name"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "trip_id",
+          "pickup_point_id",
+          "stop_order"
+        ],
+        "title": "TripStopResponse",
+        "description": "Ordered trip stop with its scheduled departure time."
+      },
+      "TripUpdateRequest": {
+        "properties": {
           "bus_id": {
             "anyOf": [
               {
@@ -9891,32 +9862,6 @@
               3
             ]
           },
-          "departure_time": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Departure Time",
-            "description": "New departure timestamp"
-          },
-          "estimated_arrival_time": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Estimated Arrival Time",
-            "description": "New arrival timestamp"
-          },
           "passenger_capacity": {
             "anyOf": [
               {
@@ -9931,22 +9876,17 @@
             "title": "Passenger Capacity",
             "description": "New passenger capacity"
           },
-          "fare_amount": {
+          "allow_overbooking": {
             "anyOf": [
               {
-                "type": "number",
-                "exclusiveMinimum": 0.0
-              },
-              {
-                "type": "string",
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+                "type": "boolean"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Fare Amount",
-            "description": "New trip fare price in EGP"
+            "title": "Allow Overbooking",
+            "description": "New overbooking allowance"
           }
         },
         "type": "object",

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.bus import Bus
 from app.models.enums import (
+    BoardingDirection,
     BusStatus,
     GenderEnum,
     PaymentMethod,
@@ -17,6 +18,7 @@ from app.models.enums import (
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
 from app.models.payment import Payment
@@ -47,12 +49,7 @@ def _setup_entities(session: Session) -> tuple[Trip, Reservation, User, User]:
     session.commit()
 
     route = Route(
-        route_number=f"R-PM-{uid}",
         name=f"Route PM {uid}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=25,
         is_active=True,
     )
     bus = Bus(
@@ -83,12 +80,12 @@ def _setup_entities(session: Session) -> tuple[Trip, Reservation, User, User]:
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now + timedelta(hours=2),
         estimated_arrival_time=now + timedelta(hours=3),
         passenger_capacity=25,
-        fare_amount=Decimal("40.00"),
         status=TripStatus.SCHEDULED,
     )
     session.add(trip)
@@ -123,11 +120,19 @@ def _setup_entities(session: Session) -> tuple[Trip, Reservation, User, User]:
     session.commit()
     session.refresh(subscription)
 
+    from app.models.pickup_point import PickupPoint
+
+    point = PickupPoint(route_id=route.id, name=f"PM Point {uid}", sequence=1)
+    session.add(point)
+    session.commit()
+
     reservation = Reservation(
         trip_id=trip.id,
         student_id=student.id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     session.add(reservation)

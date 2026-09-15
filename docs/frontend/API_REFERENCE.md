@@ -75,40 +75,38 @@ Every HTTP endpoint exposed by the backend — **92 endpoints across 13 routers*
 ### Routes — `/api/v1/routes`
 | Method | Path | Auth | Roles | Docs |
 |---|---|---|---|---|
-| POST | `/routes` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| GET | `/routes` | 🔒 | any (students read-only) | [Routes](#routes) |
-| GET | `/routes/{route_id}` | 🔒 | any (students read-only) | [Routes](#routes) |
-| PATCH | `/routes/{route_id}` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| PATCH | `/routes/{route_id}/status` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| PATCH | `/routes/{route_id}/supervisor` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| DELETE | `/routes/{route_id}` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| GET | `/routes/{route_id}/stops` | 🔒 | any (students read-only) | [Routes](#routes) |
-| POST | `/routes/{route_id}/stops` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| PATCH | `/routes/{route_id}/stops/reorder` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| PATCH | `/routes/{route_id}/stops/{route_stop_id}` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
-| DELETE | `/routes/{route_id}/stops/{route_stop_id}` | 🔒 | CEO, SUPERVISOR | [Routes](#routes) |
+| POST | `/routes` | 🔒 | CEO | [Routes](#routes) |
+| GET | `/routes` | 🔒 | any authenticated | [Routes](#routes) |
+| GET | `/routes/{route_id}` | 🔒 | any authenticated | [Routes](#routes) |
+| PATCH | `/routes/{route_id}` | 🔒 | CEO | [Routes](#routes) |
+| PATCH | `/routes/{route_id}/status` | 🔒 | CEO | [Routes](#routes) |
+| DELETE | `/routes/{route_id}` | 🔒 | CEO | [Routes](#routes) |
+| POST | `/routes/{route_id}/pickup-points` | 🔒 | CEO | [Routes](#routes) |
+| GET | `/routes/{route_id}/pickup-points` | 🔒 | any authenticated | [Routes](#routes) |
+| PATCH | `/routes/{route_id}/pickup-points/{point_id}` | 🔒 | CEO | [Routes](#routes) |
+| DELETE | `/routes/{route_id}/pickup-points/{point_id}` | 🔒 | CEO | [Routes](#routes) |
 
 ### Trips — `/api/v1/trips`
 | Method | Path | Auth | Roles | Docs |
 |---|---|---|---|---|
 | POST | `/trips` | 🔒 | CEO | [Trips](#trips) |
 | GET | `/trips` | 🔒 | CEO, SUPERVISOR | [Trips](#trips) |
+| GET | `/trips/history` | 🔒 | CEO, SUPERVISOR | [Trips](#trips) |
 | GET | `/trips/{trip_id}` | 🔒 | CEO, SUPERVISOR | [Trips](#trips) |
 | PATCH | `/trips/{trip_id}` | 🔒 | CEO | [Trips](#trips) |
+| PATCH | `/trips/{trip_id}/stops` | 🔒 | CEO | [Trips](#trips) |
+| GET | `/trips/{trip_id}/stops` | 🔒 | CEO, SUPERVISOR | [Trips](#trips) |
 | PATCH | `/trips/{trip_id}/status` | 🔒 | CEO | [Trips](#trips) |
 | DELETE | `/trips/{trip_id}` | 🔒 | CEO | [Trips](#trips) |
-| POST | `/trips/{trip_id}/pickup-points` | 🔒 | CEO | [Trips](#trips) |
-| GET | `/trips/{trip_id}/pickup-points` | 🔒 | CEO, SUPERVISOR | [Trips](#trips) |
-| PATCH | `/trips/{trip_id}/pickup-points/{point_id}` | 🔒 | CEO | [Trips](#trips) |
-| DELETE | `/trips/{trip_id}/pickup-points/{point_id}` | 🔒 | CEO | [Trips](#trips) |
+| GET | `/trips/route-points/{route_id}` | 🔒 | CEO | [Trips](#trips) |
 
 ### Reservations — `/api/v1/reservations`
 | Method | Path | Auth | Roles | Docs |
 |---|---|---|---|---|
 | POST | `/reservations` | 🔒 | STUDENT (active subscription) | [Reservations](#reservations) |
-| GET | `/reservations/available-trips` | 🔒 | any | [Reservations](#reservations) |
-| GET | `/reservations/my/tomorrow` | 🔒 | STUDENT | [Reservations](#reservations) |
-| PUT | `/reservations/my/tomorrow` | 🔒 | STUDENT | [Reservations](#reservations) |
+| GET | `/reservations/upcoming-trips` | 🔒 | STUDENT | [Reservations](#reservations) |
+| GET | `/reservations/my/selection` | 🔒 | STUDENT | [Reservations](#reservations) |
+| PUT | `/reservations/my/selection` | 🔒 | STUDENT | [Reservations](#reservations) |
 | GET | `/reservations/my` | 🔒 | STUDENT | [Reservations](#reservations) |
 | GET | `/reservations` | 🔒 | CEO, SUPERVISOR | [Reservations](#reservations) |
 | GET | `/reservations/{reservation_id}` | 🔒 | CEO, SUPERVISOR, owner student | [Reservations](#reservations) |
@@ -556,94 +554,81 @@ Fails `409` if referenced by any route or stop. Success: `204`.
 
 ## Routes
 
-`RouteResponse` (includes ordered stops and both stations):
+A route is a **logical container of pickup points**. It has no origin, destination, distance, duration, or supervisor. `RouteStop` no longer exists.
+
+`RouteResponse`:
 
 ```json
 {
   "id": 10,
-  "route_number": "R-101",
-  "name": "Campus Express",
-  "origin_station_id": 1,
-  "destination_station_id": 2,
-  "distance_km": 15.5,
-  "estimated_duration_minutes": 35,
+  "name": "Route A",
   "is_active": true,
-  "supervisor_id": 7,
   "created_at": "...",
   "updated_at": "...",
-  "origin_station": { "...": "StationResponse" },
-  "destination_station": { "...": "StationResponse" },
-  "stops": [ { "...": "RouteStopResponse" } ]
+  "pickup_points": [ { "...": "PickupPointResponse" } ]
 }
 ```
 
-`RouteStopResponse`:
+### `POST /routes` — CEO
+Request: `{ "name": "Route A" }` (1-100 chars). Response `201`: `RouteResponse`.
+
+### `GET /routes` — any authenticated
+Query: `page`, `page_size`, `is_active`, `search` (name). Response `200`: `PaginatedRouteResponse`.
+
+### `GET /routes/{route_id}` — any authenticated
+Response `200`: `RouteResponse` with `pickup_points`. Errors: `404`.
+
+### `PATCH /routes/{route_id}` — CEO
+Optional fields: `name`. Response `200`. Errors: `404`, `422`.
+
+### `PATCH /routes/{route_id}/status` — CEO
+Request: `{ "is_active": false }`. Response `200`.
+
+### `DELETE /routes/{route_id}` — CEO
+Deletes the route and its pickup points. Success: `204`.
+
+### `POST /routes/{route_id}/pickup-points` — CEO
+Request:
 
 ```json
-{ "id": 21, "route_id": 10, "station_id": 4, "stop_order": 1, "created_at": "...", "station": { "...": "StationResponse" } }
+{ "name": "Al-Mahatta", "address": null, "sequence": 1 }
 ```
 
-### `POST /routes` — CEO, SUPERVISOR
-Request:
+- `route_id` in the body is ignored; the owning route comes from the URL path (a body value must match it).
+- A pickup point belongs to **exactly one route** — a point already owned by another route can never be added again.
+- Duplicate names on the same route are rejected (`409`).
+Response `201`: `PickupPointResponse`. Errors: `404`, `409`, `422`.
+
+### `GET /routes/{route_id}/pickup-points` — any authenticated
+Response `200`: array of `PickupPointResponse` ordered by `sequence`.
+
+### `PATCH /routes/{route_id}/pickup-points/{point_id}` — CEO
+Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `409`, `422`.
+
+### `DELETE /routes/{route_id}/pickup-points/{point_id}` — CEO
+Success: `204`. Errors: `404`; `409` when referenced by trip stops or bookings.
+
+`PickupPointResponse`:
 
 ```json
 {
-  "route_number": "R-101",
-  "name": "Campus Express",
-  "origin_station_id": 1,
-  "destination_station_id": 2,
-  "distance_km": 15.5,
-  "estimated_duration_minutes": 35,
-  "supervisor_id": 7
+  "id": 5,
+  "route_id": 10,
+  "name": "Al-Mahatta",
+  "address": null,
+  "sequence": 1,
+  "created_at": "...",
+  "updated_at": "..."
 }
 ```
 
-`route_number` stored uppercase and unique; origin ≠ destination; `supervisor_id` optional (must be an active SUPERVISOR). Response `201`. Errors: `404` (station/supervisor), `409` (duplicate route number), `422`.
-
-### `GET /routes` — any authenticated (students read-only)
-Query: `page`, `page_size`, `is_active`, `supervisor_id`, `search` (route number or name).
-Response `200`: `PaginatedRouteResponse`.
-
-### `GET /routes/{route_id}` — any authenticated
-Response `200`: `RouteResponse` with `stops` ordered by `stop_order`. Errors: `404`.
-
-### `PATCH /routes/{route_id}` — CEO, SUPERVISOR
-Optional fields: `route_number`, `name`, `origin_station_id`, `destination_station_id`, `distance_km` (>0), `estimated_duration_minutes` (>0), `supervisor_id`. Response `200`. Errors: `404`, `409`, `422`.
-
-### `PATCH /routes/{route_id}/status`
-Request: `{ "is_active": false }`. Response `200`.
-
-### `PATCH /routes/{route_id}/supervisor`
-Request: `{ "supervisor_id": 7 }` or `{ "supervisor_id": null }` to unassign. Response `200`. Errors: `404`, `422` (not an active supervisor).
-
-### `DELETE /routes/{route_id}`
-Cascade-deletes intermediate stops. Success: `204`.
-
-### `GET /routes/{route_id}/stops` — any authenticated
-Response `200`: array of `RouteStopResponse` in order.
-
-### `POST /routes/{route_id}/stops` — CEO, SUPERVISOR
-Request: `{ "station_id": 4, "stop_order": 1 }` (both > 0).
-Response `201`: `RouteStopResponse`. Errors: `404` (station/route), `409` (station already a stop, or stop_order occupied), `422`.
-
-### `PATCH /routes/{route_id}/stops/reorder` — CEO, SUPERVISOR
-Request:
-
-```json
-{ "stops": [ { "route_stop_id": 21, "stop_order": 2 }, { "route_stop_id": 22, "stop_order": 1 } ] }
-```
-
-All IDs must belong to the route; no duplicate IDs or orders. Response `200`: full reordered array of `RouteStopResponse`. Errors: `404`, `422`.
-
-### `PATCH /routes/{route_id}/stops/{route_stop_id}` — CEO, SUPERVISOR
-Request: `{ "stop_order": 3 }`. Response `200`: `RouteStopResponse`. Errors: `404`, `409` (order taken), `422`.
-
-### `DELETE /routes/{route_id}/stops/{route_stop_id}`
-Success: `204`. Errors: `404` (stop not on route).
+No latitude/longitude exists on pickup points.
 
 ---
 
 ## Trips
+
+Every trip has exactly ONE direction (`OUTBOUND` ذهاب / `RETURN` عودة) and **no fare**. Trip times are DERIVED from the stops: `departure_time` = first stop's time, `estimated_arrival_time` = last stop's time.
 
 `TripResponse`:
 
@@ -651,26 +636,35 @@ Success: `204`. Errors: `404` (stop not on route).
 {
   "id": 55,
   "route_id": 10,
+  "direction": "OUTBOUND",
   "bus_id": 3,
   "supervisor_id": 7,
-  "departure_time": "2026-09-15T07:30:00Z",
-  "estimated_arrival_time": "2026-09-15T08:05:00Z",
+  "departure_time": "2026-09-20T06:30:00Z",
+  "estimated_arrival_time": "2026-09-20T07:00:00Z",
   "status": "SCHEDULED",
   "passenger_capacity": 45,
-  "fare_amount": "50.00",
+  "allow_overbooking": false,
   "created_at": "...",
   "updated_at": "...",
   "route": { "...": "RouteResponse" },
   "bus": { "...": "BusResponse" },
   "supervisor": { "...": "UserResponse" },
-  "pickup_points": [ { "...": "PickupPointResponse" } ]
+  "trip_stops": [ { "...": "TripStopResponse" } ]
 }
 ```
 
-`PickupPointResponse`:
+`TripStopResponse`:
 
 ```json
-{ "id": 9, "trip_id": 55, "name": "Cairo University Gate 3", "address": "Giza, University St.", "sequence": 1, "created_at": "...", "updated_at": "..." }
+{
+  "id": 1,
+  "trip_id": 55,
+  "pickup_point_id": 5,
+  "stop_order": 1,
+  "departure_time": "2026-09-20T06:30:00Z",
+  "point_name": "Al-Mahatta",
+  "address": null
+}
 ```
 
 ### `POST /trips` — CEO
@@ -679,35 +673,44 @@ Request (`TripCreateRequest`):
 ```json
 {
   "route_id": 10,
+  "direction": "OUTBOUND",
   "bus_id": 3,
   "supervisor_id": 7,
-  "departure_time": "2026-09-15T07:30:00Z",
-  "estimated_arrival_time": "2026-09-15T08:05:00Z",
   "passenger_capacity": 45,
-  "fare_amount": "50.00",
-  "pickup_points": [
-    { "name": "Cairo University Gate 3", "address": "Giza, University St.", "sequence": 1 }
+  "allow_overbooking": false,
+  "stops": [
+    { "pickup_point_id": 5, "stop_order": 1, "departure_time": "2026-09-20T06:30:00Z" },
+    { "pickup_point_id": 7, "stop_order": 2, "departure_time": "2026-09-20T07:00:00Z" }
   ]
 }
 ```
 
-- `route_id`, `bus_id`, `supervisor_id`, `departure_time`, `estimated_arrival_time` required; arrival must be strictly after departure.
+- `route_id`, `direction`, `bus_id`, `supervisor_id`, `stops` required; `stops` needs at least one entry.
+- Every `pickup_point_id` MUST belong to the trip's route (`422` otherwise).
+- No duplicate points and no duplicate `stop_order` (`422`).
 - `passenger_capacity` optional (defaults to bus capacity), > 0 ≤ 150.
-- `fare_amount` optional (default `50.00` EGP), > 0.
-- `pickup_points` optional list created inline.
-- Server validations: route active, bus `ACTIVE`, supervisor active SUPERVISOR, **no schedule overlap** for the same bus or supervisor (409).
+- `allow_overbooking` optional (default `false`).
+- Server validations: route active, bus `ACTIVE`, supervisor active SUPERVISOR, no schedule overlap for the same bus or supervisor (`409`).
 - Response `201`: `TripResponse` (`status: "SCHEDULED"`).
-- Errors: `404`, `409` (bus/supervisor schedule conflict), `422`.
+- Errors: `404`, `409` (bus/supervisor conflict), `422`.
 
 ### `GET /trips` — CEO, SUPERVISOR
-Query: `page`, `page_size`, `status` (TripStatus), `route_id`, `bus_id`, `supervisor_id`, `departure_after`, `departure_before` (ISO datetimes).
+Query: `page`, `page_size`, `status`, `route_id`, `bus_id`, `supervisor_id`, `direction`, `departure_after`, `departure_before`.
 Response `200`: `PaginatedTripResponse`.
+
+### `GET /trips/history` — CEO, SUPERVISOR
+Completed-trip history, RBAC-scoped: CEO sees all completed trips; a supervisor only those assigned to them. Query: `page`, `page_size`.
 
 ### `GET /trips/{trip_id}` — CEO, SUPERVISOR — `200` / `404`.
 
 ### `PATCH /trips/{trip_id}` — CEO
-All optional: `route_id`, `bus_id`, `supervisor_id`, `departure_time`, `estimated_arrival_time`, `passenger_capacity`, `fare_amount`. Re-validates bus/route/supervisor and re-checks schedule conflicts (excluding this trip).
-Response `200`: `TripResponse`. Errors: `404`, `409`, `422`.
+All optional: `bus_id`, `supervisor_id`, `passenger_capacity`, `allow_overbooking`. Re-validates bus/supervisor and re-checks schedule conflicts (excluding this trip). Response `200`. Errors: `404`, `409`, `422`.
+
+### `PATCH /trips/{trip_id}/stops` — CEO
+Replaces the trip's ordered stop sequence. Request body: `{ "stops": [ { "pickup_point_id": 5, "stop_order": 1, "departure_time": "..." }, ... ] }` — same validation rules as creation. Response `200`: `TripResponse`.
+
+### `GET /trips/{trip_id}/stops` — CEO, SUPERVISOR
+Response `200`: array of `TripStopResponse` ordered by `stop_order`.
 
 ### `PATCH /trips/{trip_id}/status` — CEO
 Request: `{ "status": "IN_PROGRESS" }`. Valid transitions:
@@ -722,36 +725,27 @@ Response `200`. Errors: `422` (invalid transition).
 
 ### `DELETE /trips/{trip_id}` — CEO — `204`.
 
-### `POST /trips/{trip_id}/pickup-points` — CEO
-Request: `{ "name": "Main Gate", "address": "Downtown Square", "sequence": 2 }` (name 1–255, sequence ≥ 1).
-Response `201`: `PickupPointResponse`. Errors: `404`, `422`.
-
-### `GET /trips/{trip_id}/pickup-points` — CEO, SUPERVISOR
-Response `200`: array ordered by `sequence`.
-
-### `PATCH /trips/{trip_id}/pickup-points/{point_id}` — CEO
-Optional: `name`, `address`, `sequence`. Response `200`. Errors: `404`, `422`.
-
-### `DELETE /trips/{trip_id}/pickup-points/{point_id}` — CEO — `204` / `404`.
+### `GET /trips/route-points/{route_id}` — CEO
+Step 2 of trip creation: fetch a route's registered pickup points so the CEO can select, order, and time them. Response `200`: `RouteResponse` with `pickup_points`.
 
 ---
 
-## Reservations — Daily Transportation Selection
+## Reservations — Daily Transportation
 
-A reservation is the student's DAILY selection: **trip + outbound pickup point + return pickup point for TOMORROW**. It requires an ACTIVE subscription but never modifies it. See [RESERVATIONS.md](RESERVATIONS.md).
+A reservation is **one directed booking**: one student + one trip (which has ONE direction) + one service date. Maximum one OUTBOUND and one RETURN booking per student per service date. See [RESERVATIONS.md](RESERVATIONS.md).
 
 `ReservationResponse`:
 
 ```json
 {
-  "id": 101,
+  "id": 41,
   "trip_id": 55,
   "student_id": 42,
   "subscription_id": 88,
-  "service_date": "2026-09-15",
-  "outbound_pickup_point_id": 9,
-  "return_pickup_point_id": 12,
-  "direction_mode": "BOTH",
+  "service_date": "2026-09-20",
+  "direction": "OUTBOUND",
+  "selected_pickup_point_id": 5,
+  "selected_pickup_point": { "...": "PickupPointResponse" },
   "status": "CONFIRMED",
   "booked_at": "2026-09-14T12:00:00Z",
   "cancelled_at": null,
@@ -759,77 +753,89 @@ A reservation is the student's DAILY selection: **trip + outbound pickup point +
   "updated_at": "...",
   "trip": { "...": "TripResponse" },
   "student": { "...": "UserResponse" },
-  "outbound_pickup_point": { "...": "PickupPointResponse" },
-  "return_pickup_point": { "...": "PickupPointResponse" }
+  "origin": "Al-Mahatta",
+  "destination": "Assiut National University"
 }
 ```
 
-`AvailableTripResponse` (for selection screens — trips departing TOMORROW):
+Destination semantics (never stored on the trip/route):
 
-```json
-{
-  "id": 55,
-  "route_id": 10,
-  "bus_id": 3,
-  "supervisor_id": 7,
-  "departure_time": "2026-09-15T07:30:00Z",
-  "estimated_arrival_time": "2026-09-15T08:05:00Z",
-  "status": "SCHEDULED",
-  "passenger_capacity": 45,
-  "confirmed_reservations_count": 12,
-  "available_seats": 33,
-  "fare_amount": "50.00",
-  "created_at": "...",
-  "updated_at": "...",
-  "route": { "...": "RouteResponse" },
-  "bus": { "...": "BusResponse" },
-  "pickup_points": [
-    { "id": 9, "trip_id": 55, "name": "Cairo University Gate 3", "address": "Giza, University St.", "sequence": 1, "created_at": "...", "updated_at": "..." },
-    { "id": 12, "trip_id": 55, "name": "Main Gate", "address": null, "sequence": 2, "created_at": "...", "updated_at": "..." }
-  ]
-}
-```
-
-`pickup_points` lists the trip's gathering points ordered by `sequence` (empty list if the trip has none). Use these `id` values as `outbound_pickup_point_id` / `return_pickup_point_id` when creating the daily selection.
+| Direction | `origin` | `destination` |
+|---|---|---|
+| `OUTBOUND` | student's selected pickup point | **student's registered university** (per-student) |
+| `RETURN` | student's university | **student's selected drop-off point** |
 
 ### `POST /reservations` — STUDENT with an ACTIVE subscription
-Request (`ReservationCreateRequest`) — there is **no `date` field**; the service date is always TOMORROW:
+Request (`ReservationCreateRequest`):
 
 ```json
 {
   "trip_id": 55,
-  "outbound_pickup_point_id": 9,
-  "return_pickup_point_id": 12,
-  "direction_mode": "BOTH"
+  "selected_pickup_point_id": 5,
+  "service_date": "2026-09-20"
 }
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `trip_id` | ✓ | must be a SCHEDULED trip departing TOMORROW |
-| `outbound_pickup_point_id` | conditional | required for `BOTH`/`OUTBOUND_ONLY`; must belong to the trip |
-| `return_pickup_point_id` | conditional | required for `BOTH`/`RETURN_ONLY`; must belong to the trip |
-| `direction_mode` | optional | `BOTH` (default) \| `OUTBOUND_ONLY` \| `RETURN_ONLY` |
+| `trip_id` | ✓ | must be a SCHEDULED trip |
+| `selected_pickup_point_id` | ✓ | pickup point for OUTBOUND, drop-off point for RETURN; must be one of the trip's stops |
+| `service_date` | optional | today or a future date within subscription validity; defaults to TOMORROW |
 
-Server rules: ACTIVE subscription covering the service date required (`422` otherwise — PENDING is not usable), trip exists (`404`) + `SCHEDULED` (`422`) + departs tomorrow (`422`), pickup points belong to the trip (`422` otherwise — cross-route points ALWAYS rejected), no existing CONFIRMED selection for tomorrow (`409`), capacity available (`409` "No available seats").
-Response `201`: `ReservationResponse` (`status: "CONFIRMED"`, `service_date` = tomorrow).
+Server rules: direction is derived from the trip (client cannot choose it); ACTIVE subscription covering the service date required (`422` — PENDING is not usable); point must be one of the trip's stops (`422`); max one OUTBOUND + one RETURN per date (`409` on duplicate direction); capacity/`allow_overbooking` respected (`409` when FULL).
+Response `201`: `ReservationResponse` (`status: "CONFIRMED"`).
 Errors: `403` (non-student), `404`, `409`, `422`.
 
-### `GET /reservations/available-trips` — any authenticated
-Query: `page`, `page_size`, `route_id` (optional).
-Returns TOMORROW's `SCHEDULED` trips with `available_seats > 0`, each including the trip's ordered `pickup_points`. Response `200`: `PaginatedAvailableTripResponse`.
+### `GET /reservations/upcoming-trips` — STUDENT
+The student transportation screen (مواصلات الغد): **ALL upcoming SCHEDULED trips** (not only tomorrow). Query: `page`, `page_size`, `direction` (optional filter).
 
-### `GET /reservations/my/tomorrow` — STUDENT
-The student's selection for tomorrow. Response `200`: `ReservationResponse` / `404` if none.
+`StudentTripViewResponse`:
 
-### `PUT /reservations/my/tomorrow` — STUDENT
-Replaces tomorrow's selection in place (same body as POST; re-validates trip/pickups/capacity). Response `200`: `ReservationResponse`. Errors: `404` (no existing selection), `422`, `409`.
+```json
+{
+  "trip_id": 55,
+  "direction": "OUTBOUND",
+  "route": { "...": "RouteResponse" },
+  "origin": "Al-Mahatta",
+  "destination": "Assiut National University",
+  "selected_point_id": null,
+  "estimated_arrival_time": "2026-09-20T07:00:00Z",
+  "booking_state": "AVAILABLE",
+  "departure_time": "2026-09-20T06:30:00Z",
+  "status": "SCHEDULED",
+  "passenger_capacity": 45,
+  "confirmed_reservations_count": 12,
+  "available_seats": 33,
+  "bus": { "...": "BusResponse" },
+  "stops": [ { "...": "TripStopResponse" } ],
+  "pickup_points": [ { "...": "PickupPointResponse" } ]
+}
+```
+
+`booking_state`: `AVAILABLE`, `BOOKED` (تم الحجز — the student already holds a booking), or `FULL` (تم الملئ — capacity reached with `allow_overbooking=false`). `BOOKED` wins over `FULL`.
+
+On RETURN trips `destination` is `null` until the student books and selects a drop-off point.
+
+### `GET /reservations/trips/{trip_id}` — STUDENT
+One trip's details from the student's perspective (dynamic destination + booking state). Query: `service_date` (optional).
+
+### `PUT /reservations/my/selection` — STUDENT
+Replaces the student's existing booking in the SAME direction as the new trip for the resolved service date (same body as POST). Response `200`: `ReservationResponse`. Errors: `404`, `409`, `422`.
+
+### `GET /reservations/my/selection` — STUDENT
+The student's bookings for a date. Query: `service_date` (defaults to TOMORROW), `direction` (optional). Response `200`: array (up to two: one OUTBOUND + one RETURN).
+
+### `GET /reservations/my/history` — STUDENT
+Completed trips the student participated in (RBAC: own bookings only). Query: `page`, `page_size`. Response `200`: `PaginatedReservationResponse`.
+
+### `GET /trips/history` — CEO, SUPERVISOR (see Trips section)
+CEO: all completed trips; supervisor: assigned trips only.
 
 ### `GET /reservations/my` — STUDENT
-Query: `page`, `page_size`, `status` (ReservationStatus), `trip_id`, `service_date_from`, `service_date_to`. Response `200`: `PaginatedReservationResponse`.
+Query: `page`, `page_size`, `status`, `direction`, `trip_id`, `service_date_from`, `service_date_to`. Response `200`: `PaginatedReservationResponse`.
 
 ### `GET /reservations` — CEO, SUPERVISOR
-Query: `page`, `page_size`, `trip_id`, `student_id`, `status`, `service_date_from`, `service_date_to`, `booked_after`, `booked_before`. Response `200`: `PaginatedReservationResponse`.
+Query: `page`, `page_size`, `trip_id`, `student_id`, `direction`, `status`, `service_date_from`, `service_date_to`, `booked_after`, `booked_before`. Response `200`: `PaginatedReservationResponse`.
 
 ### `GET /reservations/{reservation_id}` — CEO, SUPERVISOR, owner student
 Response `200` / `403` / `404`.
@@ -842,26 +848,29 @@ Response `200`: `ReservationResponse`.
 
 ## Payments
 
+Payments are created automatically with each subscription request. **Reservation/ticket payments are retired** — trips carry no fare; transportation is subscription-covered. See [PAYMENTS.md](PAYMENTS.md).
+
 `PaymentResponse`:
 
 ```json
 {
   "id": 301,
-  "reservation_id": 101,
-  "subscription_id": null,
+  "reservation_id": null,
+  "subscription_id": 88,
   "student_id": 42,
-  "amount": "50.00",
+  "amount": "750.00",
   "currency": "EGP",
   "method": "VODAFONE_CASH",
   "status": "SUBMITTED",
   "transaction_reference": "VC-123456789",
-  "notes": "Paid via Vodafone Cash number 01012345678",
+  "receipt_image_path": "uploads/payment_receipts/6f2a….png",
+  "notes": null,
   "paid_at": "2026-09-10T12:05:00Z",
   "verified_at": null,
   "verified_by": null,
   "created_at": "...",
   "updated_at": "...",
-  "reservation": { "...": "ReservationResponse or null" },
+  "subscription": { "...": "SubscriptionResponse or null" },
   "student": { "...": "UserResponse" },
   "verifier": { "...": "UserResponse or null" }
 }
@@ -870,61 +879,54 @@ Response `200`: `ReservationResponse`.
 Payment lifecycle:
 
 ```
-PENDING → SUBMITTED → VERIFIED
-   │           │
-   │           └→ REJECTED / CANCELLED
-   └→ VERIFIED | REJECTED | CANCELLED   (direct admin actions)
-VERIFIED / REJECTED / CANCELLED = terminal
+PENDING ──(receipt uploaded + reference set, digital)──► SUBMITTED ──(admin verify)──► VERIFIED
+   │                                                        │
+   └───────────────────── admin cancel ─────────────────────┴──► CANCELLED / REJECTED (terminal)
 ```
 
-A payment targets **exactly one** of `reservation_id` or `subscription_id` (never both, never neither).
+**Digital payment rule** (`VODAFONE_CASH`, `INSTAPAY`): BOTH the `transaction_reference` (payment code) AND a receipt image are REQUIRED before verification. Digital payments are born `PENDING` and advance to `SUBMITTED` when the receipt is uploaded. `CASH` needs no reference or receipt.
 
 ### `POST /payments` — STUDENT
-Creates a payment attempt for the student's own **CONFIRMED** reservation whose trip has not departed.
+**Retired**: always `422` — payments are created with subscriptions.
 
-Request:
+### `POST /payments/{payment_id}/receipt` — owner STUDENT
+Multipart upload of the required receipt image (JPEG/PNG/WEBP, ≤ 5 MB):
 
-```json
-{ "reservation_id": 101, "method": "VODAFONE_CASH", "transaction_reference": "VC-123456789", "notes": "Paid via Vodafone Cash 01012345678" }
+```
+image: (binary)
 ```
 
-- `method` required (PaymentMethod). `transaction_reference`, `notes` optional (≤ 100 / ≤ 500 chars).
-- Amount is server-derived from the trip `fare_amount`.
-- If method is VODAFONE_CASH/INSTAPAY **and** a reference is provided → status starts at `SUBMITTED` (with `paid_at`); otherwise `PENDING`.
-- Response `201`: `PaymentResponse`.
-- Errors: `403` (other student's reservation / non-student), `404`, `409` (an active payment already exists for the reservation), `422` (reservation not CONFIRMED, trip departed).
+Response `201`:
+
+```json
+{ "payment_id": 301, "receipt_image_path": "uploads/payment_receipts/6f2a….png", "status": "SUBMITTED", "message": "Payment receipt uploaded successfully" }
+```
+
+Errors: `403` (not the owner / not a student), `404`, `422` (invalid file, CASH method, terminal status). The image is stored via the storage abstraction in the PRIVATE `payment-receipts` bucket (production) and never exposed publicly.
+
+### `GET /payments/{payment_id}/receipt` — owner STUDENT, CEO, SUPERVISOR
+Streams the stored receipt image through an authorized backend flow (access re-checked per request; never a public URL). Response `200`: image bytes. Errors: `401`, `403` (unrelated student), `404` (no receipt uploaded).
 
 ### `GET /payments/my` — STUDENT
-Query: `page`, `page_size`, `status`, `method`, `reservation_id`. Response `200`: `PaginatedPaymentResponse`.
+Query: `page`, `page_size`, `status`, `method`, `subscription_id`. Response `200`: `PaginatedPaymentResponse`.
 
 ### `GET /payments` — CEO, SUPERVISOR
-Query: `page`, `page_size`, `reservation_id`, `student_id`, `method`, `status`, `created_after`, `created_before`. Response `200`: `PaginatedPaymentResponse`.
+Query: `page`, `page_size`, `subscription_id`, `student_id`, `method`, `status`, `created_after`, `created_before`. Response `200`: `PaginatedPaymentResponse`.
 
-### `GET /payments/{payment_id}` — CEO, SUPERVISOR, owner student — `200` / `403` / `404`.
+### `GET /payments/{payment_id}` — CEO, SUPERVISOR, owner student
+Response `200` / `403` / `404`.
 
-### `PATCH /payments/{payment_id}/submit` — owner STUDENT only
-
-> The route enforces `STUDENT_ONLY` at the dependency level — CEO/SUPERVISOR receive `403` here, even though the service layer contains an admin branch. Only the **owner student** can submit payment proof.
-
-Only from `PENDING`. Body optional (`PaymentSubmitRequest`): `transaction_reference` (≤100), `notes` (≤500).
-For VODAFONE_CASH/INSTAPAY a reference is **required** (either new or previously stored) — otherwise `422`.
-Response `200`: `PaymentResponse` (`status: "SUBMITTED"`, `paid_at` set).
+### `PATCH /payments/{payment_id}/submit` — STUDENT (owner only)
+Submit reference/notes. For digital methods a reference is required (`422`); a digital payment without a receipt stays `PENDING`. Response `200`: `PaymentResponse`.
 
 ### `PATCH /payments/{payment_id}/cancel` — CEO, SUPERVISOR, owner student
-Only from `PENDING`/`SUBMITTED` (not terminal). No body. Response `200`: `PaymentResponse` (`status: "CANCELLED"`).
+Response `200`. Errors: `422` (terminal status).
 
 ### `PATCH /payments/{payment_id}/verify` — CEO, SUPERVISOR
-Only from `PENDING`/`SUBMITTED`. No body. Sets `status: "VERIFIED"`, `verified_at`, `verified_by`.
-**Subscription side-effect:** if the payment targets a subscription, verifying it **activates** the subscription (`PENDING → ACTIVE`) when the end date has not passed. Response `200`: `PaymentResponse`.
+Digital methods: `422` unless reference + receipt are both present. On success sets `VERIFIED` and **activates the PENDING subscription** (or marks it `EXPIRED` if its end date passed). Response `200`.
 
 ### `PATCH /payments/{payment_id}/reject` — CEO, SUPERVISOR
-Only from `PENDING`/`SUBMITTED`. Optional body:
-
-```json
-{ "rejection_reason": "Transaction reference not found in statement" }
-```
-
-Reason is appended to `notes`. Response `200`: `PaymentResponse` (`status: "REJECTED"`).
+Optional `{ "rejection_reason": "..." }`; appended to `notes`. Response `200`.
 
 ---
 
@@ -1148,10 +1150,9 @@ Response `200`: `SubscriptionResponse` (`status: "CANCELLED"`). Errors: `403`, `
   "subscription_id": 88,
   "subscription_status": "ACTIVE",
   "service_date": "2026-09-15",
-  "direction_mode": "BOTH",
+  "direction": "OUTBOUND",
   "payment_status": "VERIFIED",
-  "outbound_pickup": "Cairo University Gate 3",
-  "return_pickup": "Main Gate",
+  "selected_point": "Al-Mahatta",
   "outbound_boarded": true,
   "return_boarded": false,
   "last_boarded_at": "2026-09-15T07:35:00Z"

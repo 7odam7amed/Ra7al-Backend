@@ -1,23 +1,34 @@
 from datetime import datetime
-from decimal import Decimal
 
 from app.exceptions.base import ConflictError, NotFoundError, ValidationError
 from app.models.bus import Bus
-from app.models.enums import BusStatus, RoleEnum, TripStatus
+from app.models.enums import BusStatus, RoleEnum, TripDirection, TripStatus
 from app.models.pickup_point import PickupPoint
 from app.models.route import Route
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 from app.models.user import User
 from app.repositories.bus_repository import BusRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.route_repository import RouteRepository
 from app.repositories.trip_repository import TripRepository
+from app.repositories.trip_stop_repository import TripStopRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.trip import TripCreateRequest, TripUpdateRequest
 
 
 class TripService:
-    """Service handling trip scheduling, conflict detection, supervisor/bus validation, and status lifecycle."""
+    """Service for scheduling directed trips with ordered stops.
+
+    Business rules enforced here:
+      - Direction is explicit: OUTBOUND (ذهاب) or RETURN (عودة).
+      - Stops must be a subset of the trip's ROUTE pickup points, ordered,
+        with a departure time per stop, no duplicates.
+      - departure_time = FIRST stop time; estimated_arrival_time = LAST stop
+        time (derived; never stored independently of the stops on create).
+      - Ticket pricing does not exist on trips (subscription covers travel).
+      - allow_overbooking is an optional per-trip setting.
+    """
 
     VALID_TRANSITIONS: dict[TripStatus, set[TripStatus]] = {
         TripStatus.SCHEDULED: {TripStatus.IN_PROGRESS, TripStatus.CANCELLED},
@@ -32,12 +43,14 @@ class TripService:
         bus_repo: BusRepository,
         route_repo: RouteRepository,
         user_repo: UserRepository,
+        trip_stop_repo: TripStopRepository | None = None,
         pickup_point_repo: PickupPointRepository | None = None,
     ) -> None:
         self.trip_repo = trip_repo
         self.bus_repo = bus_repo
         self.route_repo = route_repo
         self.user_repo = user_repo
+        self.trip_stop_repo = trip_stop_repo
         self.pickup_point_repo = pickup_point_repo
 
     def validate_supervisor(self, supervisor_id: int) -> User:
@@ -73,7 +86,55 @@ class TripService:
             raise ValidationError(f"Route with ID {route_id} is inactive")
         return route
 
-    def check_conflicts(
+    def get_route_points(self, route_id: int) -> list[PickupPoint]:
+        """List the pickup points registered under a route (CEO selection step)."""
+        self.validate_route(route_id)
+        return self.pickup_point_repo.list_by_route(route_id)
+
+    def _validate_stop_requests(
+        self, route: Route, stops: list
+    ) -> list[tuple[int, int, datetime]]:
+        """Validate ordered stop requests against the route's own points.
+
+        Returns [(pickup_point_id, stop_order, departure_time), ...] sorted by
+        stop_order. Rejects points that belong to another route.
+        """
+        route_points = {
+            p.id: p for p in self.pickup_point_repo.list_by_route(route.id)
+        }
+
+        validated: list[tuple[int, int, datetime]] = []
+        for stop in stops:
+            point = route_points.get(stop.pickup_point_id)
+            if point is None:
+                raise ValidationError(
+                    f"Pickup point {stop.pickup_point_id} does not belong to route {route.id}"
+                )
+            if stop.departure_time is None:
+                raise ValidationError(
+                    f"departure_time is required for stop {stop.pickup_point_id}"
+                )
+            validated.append(
+                (stop.pickup_point_id, stop.stop_order, stop.departure_time)
+            )
+
+        validated.sort(key=lambda item: item[1])
+        return validated
+
+    @staticmethod
+    def _derive_trip_times(
+        validated_stops: list[tuple[int, int, datetime]],
+    ) -> tuple[datetime, datetime]:
+        """First stop time = departure, last stop time = estimated arrival."""
+        first_time = validated_stops[0][2]
+        last_time = validated_stops[-1][2]
+        if last_time < first_time:
+            raise ValidationError(
+                "The last stop's departure time cannot be before the first stop's departure time"
+            )
+        return first_time, last_time
+
+    def _check_stop_time_conflicts(
         self,
         bus_id: int,
         supervisor_id: int,
@@ -81,12 +142,7 @@ class TripService:
         estimated_arrival_time: datetime,
         exclude_trip_id: int | None = None,
     ) -> None:
-        """Verify that neither the bus nor the supervisor has overlapping active trips."""
-        if estimated_arrival_time <= departure_time:
-            raise ValidationError(
-                "estimated_arrival_time must be strictly after departure_time"
-            )
-
+        """Verify neither the bus nor supervisor has overlapping active trips."""
         bus_conflict = self.trip_repo.find_bus_conflict(
             bus_id=bus_id,
             departure_time=departure_time,
@@ -112,16 +168,22 @@ class TripService:
             )
 
     def create_trip(self, data: TripCreateRequest) -> Trip:
-        """Schedule a new trip with validation and conflict checks."""
-        self.validate_route(data.route_id)
+        """Schedule a new directed trip with validated ordered stops."""
+        route = self.validate_route(data.route_id)
         bus = self.validate_bus(data.bus_id)
         self.validate_supervisor(data.supervisor_id)
 
-        self.check_conflicts(
+        if self.trip_stop_repo is None or self.pickup_point_repo is None:
+            raise ValidationError("Trip stop repositories are not configured")
+
+        validated = self._validate_stop_requests(route, data.stops)
+        departure_time, arrival_time = self._derive_trip_times(validated)
+
+        self._check_stop_time_conflicts(
             bus_id=data.bus_id,
             supervisor_id=data.supervisor_id,
-            departure_time=data.departure_time,
-            estimated_arrival_time=data.estimated_arrival_time,
+            departure_time=departure_time,
+            estimated_arrival_time=arrival_time,
         )
 
         capacity = (
@@ -130,34 +192,31 @@ class TripService:
             else bus.capacity
         )
 
-        fare = (
-            data.fare_amount
-            if data.fare_amount is not None
-            else Decimal("50.00")
-        )
-
         trip = self.trip_repo.create(
             route_id=data.route_id,
+            direction=data.direction,
             bus_id=data.bus_id,
             supervisor_id=data.supervisor_id,
-            departure_time=data.departure_time,
-            estimated_arrival_time=data.estimated_arrival_time,
+            departure_time=departure_time,
+            estimated_arrival_time=arrival_time,
             passenger_capacity=capacity,
-            fare_amount=fare,
+            allow_overbooking=data.allow_overbooking,
             status=TripStatus.SCHEDULED,
         )
 
-        if data.pickup_points and self.pickup_point_repo is not None:
-            for pt in data.pickup_points:
-                self.pickup_point_repo.create(
+        self.trip_stop_repo.create_many(
+            [
+                TripStop(
                     trip_id=trip.id,
-                    name=pt.name,
-                    address=pt.address,
-                    sequence=pt.sequence,
+                    pickup_point_id=point_id,
+                    stop_order=stop_order,
+                    departure_time=stop_time,
                 )
-            trip = self.trip_repo.get_by_id(trip.id) or trip
+                for point_id, stop_order, stop_time in validated
+            ]
+        )
 
-        return trip
+        return self.trip_repo.get_by_id(trip.id) or trip
 
     def get_trip_by_id(self, trip_id: int) -> Trip:
         """Retrieve a trip by ID or raise NotFoundError."""
@@ -174,6 +233,7 @@ class TripService:
         route_id: int | None = None,
         bus_id: int | None = None,
         supervisor_id: int | None = None,
+        direction: TripDirection | None = None,
         departure_after: datetime | None = None,
         departure_before: datetime | None = None,
     ) -> tuple[list[Trip], int]:
@@ -190,32 +250,19 @@ class TripService:
             route_id=route_id,
             bus_id=bus_id,
             supervisor_id=supervisor_id,
+            direction=direction,
             departure_after=departure_after,
             departure_before=departure_before,
         )
 
     def update_trip(self, trip_id: int, data: TripUpdateRequest) -> Trip:
-        """Update trip details and re-validate resources and schedule conflicts."""
+        """Update trip bus/supervisor/capacity/overbooking and re-validate conflicts."""
         trip = self.get_trip_by_id(trip_id)
 
-        target_route_id = data.route_id if data.route_id is not None else trip.route_id
         target_bus_id = data.bus_id if data.bus_id is not None else trip.bus_id
         target_supervisor_id = (
             data.supervisor_id if data.supervisor_id is not None else trip.supervisor_id
         )
-        target_departure = (
-            data.departure_time
-            if data.departure_time is not None
-            else trip.departure_time
-        )
-        target_arrival = (
-            data.estimated_arrival_time
-            if data.estimated_arrival_time is not None
-            else trip.estimated_arrival_time
-        )
-
-        if data.route_id is not None:
-            self.validate_route(target_route_id)
 
         if data.bus_id is not None:
             self.validate_bus(target_bus_id)
@@ -223,25 +270,72 @@ class TripService:
         if data.supervisor_id is not None:
             self.validate_supervisor(target_supervisor_id)
 
-        # Check time ordering and conflicts if relevant fields are being changed
-        self.check_conflicts(
+        self._check_stop_time_conflicts(
             bus_id=target_bus_id,
             supervisor_id=target_supervisor_id,
-            departure_time=target_departure,
-            estimated_arrival_time=target_arrival,
+            departure_time=trip.departure_time,
+            estimated_arrival_time=trip.estimated_arrival_time,
             exclude_trip_id=trip.id,
         )
 
         return self.trip_repo.update(
             trip=trip,
-            route_id=data.route_id,
             bus_id=data.bus_id,
             supervisor_id=data.supervisor_id,
-            departure_time=data.departure_time,
-            estimated_arrival_time=data.estimated_arrival_time,
             passenger_capacity=data.passenger_capacity,
-            fare_amount=data.fare_amount,
+            allow_overbooking=data.allow_overbooking,
         )
+
+    def update_trip_stops(
+        self, trip_id: int, stops: list
+    ) -> Trip:
+        """Replace the trip's full ordered stop sequence (CEO only).
+
+        Stops must again be a subset of the trip's route points; trip-level
+        departure/arrival are re-derived from the new first/last stop times.
+        Only SCHEDULED trips can be re-stopped.
+        """
+        trip = self.get_trip_by_id(trip_id)
+        if trip.status != TripStatus.SCHEDULED:
+            raise ValidationError(
+                "Only SCHEDULED trips can have their stop sequence replaced"
+            )
+        if self.trip_stop_repo is None or self.pickup_point_repo is None:
+            raise ValidationError("Trip stop repositories are not configured")
+
+        route = self.route_repo.get_by_id(trip.route_id)
+        if route is None:
+            raise NotFoundError(f"Route with ID {trip.route_id} not found")
+
+        validated = self._validate_stop_requests(route, stops)
+        departure_time, arrival_time = self._derive_trip_times(validated)
+
+        self._check_stop_time_conflicts(
+            bus_id=trip.bus_id,
+            supervisor_id=trip.supervisor_id,
+            departure_time=departure_time,
+            estimated_arrival_time=arrival_time,
+            exclude_trip_id=trip.id,
+        )
+
+        self.trip_stop_repo.delete_for_trip(trip.id)
+        self.trip_stop_repo.create_many(
+            [
+                TripStop(
+                    trip_id=trip.id,
+                    pickup_point_id=point_id,
+                    stop_order=stop_order,
+                    departure_time=stop_time,
+                )
+                for point_id, stop_order, stop_time in validated
+            ]
+        )
+        self.trip_repo.update(
+            trip,
+            departure_time=departure_time,
+            estimated_arrival_time=arrival_time,
+        )
+        return self.trip_repo.get_by_id(trip.id) or trip
 
     def update_trip_status(self, trip_id: int, new_status: TripStatus) -> Trip:
         """Transition a trip to a new lifecycle status with validation."""

@@ -95,7 +95,11 @@ def test_subscription_request_schemas() -> None:
     assert not hasattr(sub_req, "route_id")
     assert not hasattr(sub_req, "outbound_pickup_point_id")
     assert not hasattr(sub_req, "return_pickup_point_id")
-    assert not hasattr(sub_req, "trip_id")
+    assert not hasattr(sub_req, "trip_id")  # and none on the model either
+    from app.models.subscription import Subscription
+
+    assert not hasattr(Subscription, "outbound_pickup_point_id")
+    assert not hasattr(Subscription, "return_pickup_point_id")
 
     # Invalid ID
     with pytest.raises(ValidationError):

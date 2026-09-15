@@ -23,10 +23,11 @@ from app.models.payment import Payment
 from app.models.pickup_point import PickupPoint
 from app.models.reservation import Reservation
 from app.models.route import Route
-from app.models.station import Station
+from app.models.trip_stop import TripStop
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 from app.models.university import University
 from app.models.user import User
 
@@ -54,19 +55,8 @@ def _create_setup(db: Session):
     db.add(uni)
     db.commit()
 
-
-    s1 = Station(name="Start", code="ST1_" + secrets.token_hex(4), latitude=30.0, longitude=31.0, is_active=True)
-    s2 = Station(name="End", code="ST2_" + secrets.token_hex(4), latitude=30.1, longitude=31.1, is_active=True)
-    db.add_all([s1, s2])
-    db.commit()
-
     route = Route(
-        route_number="R_" + secrets.token_hex(4),
         name="Route 1",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=15.0,
-        estimated_duration_minutes=30,
         is_active=True,
     )
     db.add(route)
@@ -81,12 +71,22 @@ def _create_setup(db: Session):
 
     dep = datetime.now(timezone.utc) + timedelta(days=2)
     arr = dep + timedelta(minutes=45)
-    trip1 = Trip(route_id=route.id, bus_id=bus.id, supervisor_id=sup1.id, departure_time=dep, estimated_arrival_time=arr, status=TripStatus.SCHEDULED, passenger_capacity=30)
+    trip1 = Trip(route_id=route.id, direction="OUTBOUND", bus_id=bus.id, supervisor_id=sup1.id, departure_time=dep, estimated_arrival_time=arr, status=TripStatus.SCHEDULED, passenger_capacity=30)
     db.add(trip1)
     db.commit()
 
-    pp1 = PickupPoint(trip_id=trip1.id, name="Gathering Point 1", address="Address 1", sequence=1)
+    pp1 = PickupPoint(route_id=route.id, name="Gathering Point 1", address="Address 1", sequence=1)
     db.add(pp1)
+    db.commit()
+
+    db.add(
+        TripStop(
+            trip_id=trip1.id,
+            pickup_point_id=pp1.id,
+            stop_order=1,
+            departure_time=dep,
+        )
+    )
     db.commit()
 
 
@@ -135,12 +135,14 @@ def test_student_cannot_access_another_students_reservation(client_with_db: Test
     student_a, token_a = _create_user(db_session, "student_a@test.edu", RoleEnum.STUDENT, "Student A")
     student_b, token_b = _create_user(db_session, "student_b@test.edu", RoleEnum.STUDENT, "Student B")
 
-    # Student A creates a reservation
+    # Student A creates a directed reservation (trip1 is OUTBOUND)
     res_a = Reservation(
         trip_id=data["trip1"].id,
         student_id=student_a.id,
         subscription_id=_make_subscription(db_session, data, student_a.id).id,
         service_date=data["trip1"].departure_time.date(),
+        direction="OUTBOUND",
+        selected_pickup_point_id=data["pp1"].id,
         status=ReservationStatus.CONFIRMED,
     )
     db_session.add(res_a)
@@ -163,20 +165,12 @@ def test_student_cannot_access_another_students_payment(client_with_db: TestClie
     student_a, token_a = _create_user(db_session, "student_pay_a@test.edu", RoleEnum.STUDENT, "Student A")
     student_b, token_b = _create_user(db_session, "student_pay_b@test.edu", RoleEnum.STUDENT, "Student B")
 
-    res_a = Reservation(
-        trip_id=data["trip1"].id,
-        student_id=student_a.id,
-        subscription_id=_make_subscription(db_session, data, student_a.id).id,
-        service_date=data["trip1"].departure_time.date(),
-        status=ReservationStatus.CONFIRMED,
-    )
-    db_session.add(res_a)
-    db_session.commit()
+    sub_a = _make_subscription(db_session, data, student_a.id)
 
     payment_a = Payment(
-        reservation_id=res_a.id,
+        subscription_id=sub_a.id,
         student_id=student_a.id,
-        amount=Decimal("50.00"),
+        amount=Decimal("600.00"),
         currency="EGP",
         method=PaymentMethod.VODAFONE_CASH,
         status=PaymentStatus.PENDING,

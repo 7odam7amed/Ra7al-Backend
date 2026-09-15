@@ -26,11 +26,13 @@ from sqlalchemy.orm import Session
 
 from app.exceptions.base import ConflictError, ValidationError
 from app.models.enums import (
+    BoardingDirection,
     GenderEnum,
     ReservationStatus,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
 from app.models.pickup_point import PickupPoint
@@ -38,6 +40,7 @@ from app.models.reservation import Reservation
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 from app.models.user import User
 from app.schemas.reservation import ReservationCreateRequest
 from app.schemas.subscription_plan import SubscriptionPlanCreate
@@ -79,12 +82,14 @@ def _make_trip(
     trip_id: int = 10,
     departure: datetime | None = None,
     capacity: int = 10,
+    direction: TripDirection = TripDirection.OUTBOUND,
 ) -> Trip:
     if departure is None:
         departure = datetime.now(timezone.utc) + timedelta(days=1)
     trip = Trip(
         id=trip_id,
         route_id=1,
+        direction=direction,
         bus_id=1,
         supervisor_id=2,
         departure_time=departure,
@@ -92,10 +97,20 @@ def _make_trip(
         status=TripStatus.SCHEDULED,
         passenger_capacity=capacity,
     )
-    trip.pickup_points = [
-        PickupPoint(id=11, trip_id=trip_id, name="Gate 3", sequence=1),
-        PickupPoint(id=12, trip_id=trip_id, name="Main Gate", sequence=2),
+    point_1 = PickupPoint(id=11, route_id=1, name="Gate 3", sequence=1)
+    point_2 = PickupPoint(id=12, route_id=1, name="Main Gate", sequence=2)
+    trip.trip_stops = [
+        TripStop(
+            id=21, trip_id=trip_id, pickup_point_id=11, stop_order=1,
+            departure_time=departure,
+        ),
+        TripStop(
+            id=22, trip_id=trip_id, pickup_point_id=12, stop_order=2,
+            departure_time=departure + timedelta(hours=1),
+        ),
     ]
+    trip.trip_stops[0].pickup_point = point_1
+    trip.trip_stops[1].pickup_point = point_2
     return trip
 
 
@@ -142,7 +157,7 @@ def _stub_happy_path(
     """Stub the full book_trip dependency chain for a successful booking."""
     subscription_repo.get_active_for_student_on_date.return_value = subscription
     reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = None
+    reservation_repo.get_active_for_student_date_direction.return_value = None
     reservation_repo.get_subscription_row_for_update.return_value = subscription
     reservation_repo.count_confirmed_for_subscription_in_window.return_value = used_days
     reservation_repo.count_confirmed_for_trip.return_value = 0
@@ -152,6 +167,10 @@ def _stub_happy_path(
         student_id=subscription.student_id,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND
+        if trip.direction == TripDirection.OUTBOUND
+        else BoardingDirection.RETURN,
+        selected_pickup_point_id=11,
         status=ReservationStatus.CONFIRMED,
     )
 
@@ -162,8 +181,7 @@ def _book(service: ReservationService, trip: Trip, service_date: date):
         data=ReservationCreateRequest(
             trip_id=trip.id,
             service_date=service_date,
-            outbound_pickup_point_id=11,
-            return_pickup_point_id=12,
+            selected_pickup_point_id=11,
         ),
     )
 
@@ -339,17 +357,18 @@ def test_k_duplicate_service_date_clean_business_error() -> None:
     _stub_happy_path(
         reservation_repo, subscription_repo, trip=trip, subscription=subscription
     )
-    # Existing CONFIRMED selection for the same student+service_date.
-    reservation_repo.get_active_for_student_and_date.return_value = Reservation(
+    # Existing CONFIRMED OUTBOUND booking for the same student+date+direction.
+    reservation_repo.get_active_for_student_date_direction.return_value = Reservation(
         id=99,
         trip_id=trip.id,
         student_id=1,
         subscription_id=subscription.id,
         service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
         status=ReservationStatus.CONFIRMED,
     )
 
-    with pytest.raises(ConflictError, match="already has an active daily selection"):
+    with pytest.raises(ConflictError, match="already has an active OUTBOUND booking"):
         _book(service, trip, trip.departure_time.date())
 
 

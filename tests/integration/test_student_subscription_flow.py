@@ -27,7 +27,7 @@ from app.models.enums import (
 )
 from app.models.pickup_point import PickupPoint
 from app.models.route import Route
-from app.models.station import Station
+from app.models.trip_stop import TripStop
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
 from app.models.user import User
@@ -56,28 +56,18 @@ def _create_user_and_token(
 
 
 def _setup_subscription_fixtures(session: Session) -> dict:
-    """Seed stations, an active route, a scheduled trip with pickup points, and plans."""
+    """Seed a route container, a directed trip with a trip stop, and plans."""
     suffix = f"{datetime.now().microsecond}"
-    s1 = Station(name="Campus Gate", code=f"SS-{suffix}-1", latitude=30.0, longitude=31.0)
-    s2 = Station(name="Downtown", code=f"SS-{suffix}-2", latitude=30.1, longitude=31.1)
     bus = Bus(
         bus_number=f"BUS-SUBFLOW-{suffix}",
         license_plate=f"PLT-SUBFLOW-{suffix}",
         capacity=30,
         status=BusStatus.ACTIVE,
     )
-    session.add_all([s1, s2, bus])
+    session.add(bus)
     session.flush()
 
-    route = Route(
-        route_number=f"R-SUBFLOW-{suffix}",
-        name="Subscription Flow Route",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=12.0,
-        estimated_duration_minutes=25,
-        is_active=True,
-    )
+    route = Route(name=f"Subscription Flow Route-{suffix}", is_active=True)
     session.add(route)
     session.flush()
 
@@ -85,6 +75,7 @@ def _setup_subscription_fixtures(session: Session) -> dict:
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction="OUTBOUND",
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now + timedelta(hours=2),
@@ -95,8 +86,17 @@ def _setup_subscription_fixtures(session: Session) -> dict:
     session.add(trip)
     session.flush()
 
-    pickup = PickupPoint(trip_id=trip.id, name="Main Gate Pickup", sequence=1)
+    pickup = PickupPoint(route_id=route.id, name="Main Gate Pickup", sequence=1)
     session.add(pickup)
+    session.flush()
+    session.add(
+        TripStop(
+            trip_id=trip.id,
+            pickup_point_id=pickup.id,
+            stop_order=1,
+            departure_time=now + timedelta(hours=2),
+        )
+    )
 
     plan_monthly = SubscriptionPlan(
         name="Monthly Pass",
@@ -144,7 +144,7 @@ def test_student_can_read_routes_for_daily_selection(
     assert detail.status_code == 200
     assert detail.json()["id"] == fixtures["route"].id
 
-    stops = client_with_db.get(f"/api/v1/routes/{fixtures['route'].id}/stops", headers=headers)
+    stops = client_with_db.get(f"/api/v1/routes/{fixtures['route'].id}/pickup-points", headers=headers)
     assert stops.status_code == 200
 
 
@@ -160,27 +160,20 @@ def test_student_route_management_matrix_unchanged(
     assert client_with_db.post(
         "/api/v1/routes",
         json={
-            "route_number": "R-STU-DENY",
             "name": "Student Route",
-            "origin_station_id": 1,
-            "destination_station_id": 2,
-            "distance_km": 1.0,
-            "estimated_duration_minutes": 10,
         },
         headers=headers,
     ).status_code == 403
     assert client_with_db.patch(f"/api/v1/routes/{route_id}", json={"name": "X"}, headers=headers).status_code == 403
     assert client_with_db.patch(f"/api/v1/routes/{route_id}/status", json={"is_active": False}, headers=headers).status_code == 403
-    assert client_with_db.patch(f"/api/v1/routes/{route_id}/supervisor", json={"supervisor_id": None}, headers=headers).status_code == 403
     assert client_with_db.delete(f"/api/v1/routes/{route_id}", headers=headers).status_code == 403
-    assert client_with_db.post(f"/api/v1/routes/{route_id}/stops", json={"station_id": 1, "stop_order": 1}, headers=headers).status_code == 403
-    assert client_with_db.patch(f"/api/v1/routes/{route_id}/stops/reorder", json={"stops": []}, headers=headers).status_code == 403
-    assert client_with_db.delete(f"/api/v1/routes/{route_id}/stops/1", headers=headers).status_code == 403
+    assert client_with_db.post(f"/api/v1/routes/{route_id}/pickup-points", json={"name": "Point X"}, headers=headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/pickup-points/{fixtures['pickup'].id}", json={"name": "Y"}, headers=headers).status_code == 403
+    assert client_with_db.delete(f"/api/v1/routes/{route_id}/pickup-points/{fixtures['pickup'].id}", headers=headers).status_code == 403
 
     # Route must be untouched by the denied attempts
     detail = client_with_db.get(f"/api/v1/routes/{route_id}", headers=headers)
     assert detail.status_code == 200
-    assert detail.json()["name"] == "Subscription Flow Route"
     assert detail.json()["is_active"] is True
 
 
@@ -237,8 +230,8 @@ def test_student_full_subscription_flow_end_to_end(
     assert data["status"] == "PENDING"
     # No route/trip/pickup coupling in the response
     assert data.get("route_id") is None
-    assert data.get("outbound_pickup_point_id") is None
-    assert data.get("return_pickup_point_id") is None
+    assert "outbound_pickup_point_id" not in data
+    assert "return_pickup_point_id" not in data
     # Inclusive-date validity: start + duration - 1
     assert data["end_date"] == (
         datetime.fromisoformat(start_date).date() + timedelta(days=29)

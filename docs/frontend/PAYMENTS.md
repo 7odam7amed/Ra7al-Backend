@@ -1,6 +1,8 @@
-# Payments
+# Payments (Post-Refactor)
 
-Verified against `app/api/v1/payments.py`, `app/services/payment_service.py`, the `Payment` model, and `app/models/enums.py`. **Payment functionality exists** — for both trip reservations and route subscriptions.
+Verified against `app/api/v1/payments.py`, `app/services/payment_service.py`, and the `Payment` model.
+
+Payments are created automatically with each subscription request. **Reservation payments are retired** — trips no longer carry a fare; transportation is covered by the subscription.
 
 ---
 
@@ -11,21 +13,22 @@ Verified against `app/api/v1/payments.py`, `app/services/payment_service.py`, th
 ```json
 {
   "id": 301,
-  "reservation_id": 101,
-  "subscription_id": null,
+  "reservation_id": null,
+  "subscription_id": 9,
   "student_id": 42,
-  "amount": "50.00",
+  "amount": "750.00",
   "currency": "EGP",
   "method": "VODAFONE_CASH",
   "status": "SUBMITTED",
   "transaction_reference": "VC-123456789",
-  "notes": "Paid via Vodafone Cash number 01012345678",
+  "receipt_image_path": "uploads/payment_receipts/6f2a….png",
+  "notes": null,
   "paid_at": "2026-09-10T12:05:00Z",
   "verified_at": null,
   "verified_by": null,
   "created_at": "…",
   "updated_at": "…",
-  "reservation": { "…": "ReservationResponse or null" },
+  "subscription": { "…": "SubscriptionResponse or null" },
   "student": { "…": "UserResponse" },
   "verifier": { "…": "UserResponse or null" }
 }
@@ -33,117 +36,113 @@ Verified against `app/api/v1/payments.py`, `app/services/payment_service.py`, th
 
 | Field | Notes |
 |---|---|
-| `reservation_id` / `subscription_id` | Exactly **one** must be set (DB constraint `chk_payment_target_exclusive`); the other is `null`. |
-| `amount` | Server-derived: trip `fare_amount` for reservation payments, plan price for subscription payments. The client never sets it. |
-| `currency` | Always `"EGP"`. |
+| `subscription_id` | Set for subscription payments (the only kind created today). |
+| `amount` | Server-derived from the plan price. The client never sets it. |
 | `method` | `VODAFONE_CASH`, `INSTAPAY`, or `CASH`. |
+| `transaction_reference` | REQUIRED for digital methods (`VODAFONE_CASH`, `INSTAPAY`); optional/tolerated for CASH. |
+| `receipt_image_path` | Object reference in the PRIVATE `payment-receipts` storage namespace. REQUIRED for digital methods before verification. |
 | `status` | Lifecycle below. |
-| `transaction_reference` | ≤ 100 chars; optional for CASH, effectively required for digital methods. |
-| `notes` | ≤ 500 chars; rejection reasons are appended here. |
-| `paid_at` / `verified_at` / `verified_by` | Set by the server during submit/verify/reject. |
 
-## 2. Status Lifecycle (exact transitions)
+## 2. Status Lifecycle
 
 ```
-                 ┌──────────────────────────────────────────┐
-                 │            (admin verify)                │
-                 ▼                                          │
-   ┌─────────┐  submit   ┌───────────┐  verify    ┌──────────┴─┐
-   │ PENDING │─────────► │ SUBMITTED │──────────► │  VERIFIED  │ (terminal)
-   └────┬────┘           └─────┬─────┘            └────────────┘
-        │  admin verify        │  admin reject/cancel
-        │      ┌───────────────┼──────────────┐
-        ▼      ▼               ▼              ▼
-  ┌──────────┐        ┌──────────┐    ┌───────────┐
-  │ VERIFIED │        │ REJECTED │    │ CANCELLED │   (both terminal)
-  └──────────┘        └──────────┘    └───────────┘
+PENDING ──(receipt uploaded + reference set)──► SUBMITTED ──(admin verify)──► VERIFIED
+   │                                                │
+   └──────────────────── admin cancel ──────────────┴──► CANCELLED / REJECTED (terminal)
 ```
 
-- `VERIFIED`, `REJECTED`, `CANCELLED` are **terminal** — any action on them → `422`.
-- Transitions are enforced in `PaymentService.VALID_TRANSITIONS` and re-checked per endpoint.
-- Uniqueness: at most one **active** (`PENDING`/`SUBMITTED`/`VERIFIED`) payment per reservation, and per subscription (partial unique indexes → `409` on violation).
+- Digital payments are born **PENDING** and advance to `SUBMITTED` when the receipt image is uploaded (the reference is provided at subscription time).
+- `VERIFIED`, `REJECTED`, `CANCELLED` are terminal.
+- At most one active payment per subscription (partial unique index → `409`).
 
-## 3. Endpoints
+## 3. Digital payment receipt (REQUIRED)
 
-| Method | Path | Roles | Purpose |
-|---|---|---|---|
-| `POST /payments` | STUDENT | Create a payment attempt for own CONFIRMED reservation. |
-| `GET /payments/my` | STUDENT | Own payment history (`page`, `page_size`, `status`, `method`, `reservation_id`). |
-| `GET /payments` | CEO, SUPERVISOR | All payments (`page`, `page_size`, `reservation_id`, `student_id`, `method`, `status`, `created_after`, `created_before`). |
-| `GET /payments/{payment_id}` | CEO, SUPERVISOR, owner student | Single payment. |
-| `PATCH /payments/{payment_id}/submit` | **owner STUDENT only** (route enforces `STUDENT_ONLY`; admins get 403) | Submit proof/reference: `PENDING → SUBMITTED`. |
-| `PATCH /payments/{payment_id}/cancel` | CEO, SUPERVISOR, owner student | Cancel an unsettled attempt. |
-| `PATCH /payments/{payment_id}/verify` | CEO, SUPERVISOR | Verify: settles the record; **activates the subscription** if it targets one. |
-| `PATCH /payments/{payment_id}/reject` | CEO, SUPERVISOR | Reject with optional reason. |
+For digital methods the student MUST provide **both**:
 
-## 4. Request Schemas
+1. `transaction_reference` (payment code) — at subscription creation,
+2. a receipt image — uploaded after creation.
 
-### `POST /payments` (`PaymentCreateRequest`)
+### Upload
+
+`POST /api/v1/payments/{payment_id}/receipt` (owner STUDENT only, multipart):
+
+```
+image: (binary) — JPEG / PNG / WEBP, ≤ 5 MB
+```
+
+Response `201`:
 
 ```json
 {
-  "reservation_id": 101,
-  "method": "VODAFONE_CASH",
-  "transaction_reference": "VC-123456789",
-  "notes": "Paid via Vodafone Cash 01012345678"
+  "payment_id": 301,
+  "receipt_image_path": "uploads/payment_receipts/6f2a….png",
+  "status": "SUBMITTED",
+  "message": "Payment receipt uploaded successfully"
 }
 ```
 
-- `method` required; `transaction_reference`/`notes` optional.
-- Server validations: reservation exists (`404`), belongs to the student (`403`), is `CONFIRMED` (`422`), trip not departed (`422`), no active payment on the reservation (`409`).
-- Initial status: `SUBMITTED` (+`paid_at`) if method is digital **and** a reference was provided; otherwise `PENDING`.
+Rules:
 
-### `PATCH /{id}/submit` (`PaymentSubmitRequest`)
+- Only the payment's owner student can upload (`403` otherwise).
+- Only digital methods accept receipts (`422` for CASH).
+- Only while the payment is `PENDING`/`SUBMITTED`.
+- Invalid files (wrong type, executable content, > 5 MB) are rejected with `422`.
+- The image is stored via the storage abstraction in the **private** `payment-receipts` bucket (Supabase) or the local `uploads/payment_receipts/` directory in development.
 
-```json
-{ "transaction_reference": "IP-987654321", "notes": "optional" }
-```
+### View (authorized backend flow only)
 
-- Only from `PENDING` (`422` otherwise).
-- For `VODAFONE_CASH`/`INSTAPAY`, a reference is required — the new one or one already stored on the payment — otherwise `422`.
-- Sets `status: "SUBMITTED"`, `paid_at = now`.
+`GET /api/v1/payments/{payment_id}/receipt`
 
-### `PATCH /{id}/reject` (`PaymentRejectRequest`)
+- Accessible to the owner student, and to CEO/SUPERVISOR for review.
+- Streams the image (`image/png` etc.) — **never** a public URL. Access is re-checked on every request.
+- `404` before any upload; `403` for unrelated students; `401` unauthenticated.
 
-```json
-{ "rejection_reason": "Transaction reference not found in statement" }
-```
+## 4. Endpoints
 
-- Only from `PENDING`/`SUBMITTED`. Body optional. Reason is appended to `notes`; sets `verified_at`/`verified_by` to the admin.
+| Method | Path | Roles | Purpose |
+|---|---|---|---|
+| `POST /payments` | STUDENT | **Retired**: always `422` — payments are created with subscriptions. |
+| `GET /payments/my` | STUDENT | Own payment history (`page`, `page_size`, `status`, `method`). |
+| `GET /payments` | CEO, SUPERVISOR | All payments with filters. |
+| `GET /payments/{payment_id}` | CEO, SUPERVISOR, owner student | Single payment. |
+| `POST /payments/{payment_id}/receipt` | owner STUDENT | Upload the required digital receipt image. |
+| `GET /payments/{payment_id}/receipt` | owner STUDENT, CEO, SUPERVISOR | Stream the receipt image (authorized flow). |
+| `PATCH /payments/{payment_id}/submit` | owner STUDENT | Submit reference/notes; digital payments without a receipt stay `PENDING`. |
+| `PATCH /payments/{payment_id}/cancel` | CEO, SUPERVISOR, owner student | Cancel an unsettled attempt. |
+| `PATCH /payments/{payment_id}/verify` | CEO, SUPERVISOR | Verify: **requires reference + receipt for digital methods**; activates the subscription. |
+| `PATCH /payments/{payment_id}/reject` | CEO, SUPERVISOR | Reject with optional reason. |
 
 ## 5. Subscription Activation Rule (critical)
 
-`PATCH /payments/{payment_id}/verify` on a **subscription** payment:
+`PATCH /payments/{payment_id}/verify` on a subscription payment:
 
-1. Validates the payment belongs to the subscription and is its current payment attempt.
-2. If the subscription is `PENDING`:
+1. For digital methods: rejects with `422` unless BOTH `transaction_reference` and `receipt_image_path` are present.
+2. Validates the payment belongs to the subscription and is its current payment attempt.
+3. If the subscription is `PENDING`:
    - `end_date` already passed → subscription set to `EXPIRED`.
    - otherwise → subscription set to **`ACTIVE`**.
 
-This verify action is the **only** way a subscription becomes ACTIVE. Rejected/cancelled subscription payments leave the subscription PENDING (the student can retry by renewing or contacting the CEO).
+This verify action is the **only** way a subscription becomes ACTIVE.
 
-## 6. Frontend Flow
-
-### Student (reservation payment)
+## 6. Frontend Flow (digital payment)
 
 ```
-Book seat → POST /reservations → 201 (CONFIRMED)
+POST /subscriptions { plan_id, start_date, payment_method: "VODAFONE_CASH", transaction_reference: "VC-…" }
+   → 201 { id, payment_id, status: "PENDING" }
    ↓
-POST /payments { reservation_id, method, transaction_reference? } → 201
-   ↓ status PENDING (or SUBMITTED if reference given for digital method)
-If PENDING: PATCH /payments/{id}/submit { transaction_reference }
+POST /payments/{payment_id}/receipt  (multipart image)
+   → 201 { status: "SUBMITTED" }
    ↓
-Wait for admin → poll GET /payments/my until status VERIFIED/REJECTED
+Wait for admin → poll GET /payments/my until VERIFIED/REJECTED
+   ↓ VERIFIED
+GET /subscriptions/{id} → status: "ACTIVE"
 ```
-
-### Student (subscription payment)
-
-Created automatically with the subscription (`POST /subscriptions`). If paid digitally with a reference at purchase time it starts `SUBMITTED`; otherwise the student waits for admin verification. Track via `payment_status` on `GET /subscriptions/{id}` / `GET /subscriptions/my`.
 
 ### Admin (CEO/SUPERVISOR)
 
 ```
 GET /payments?status=SUBMITTED   (review queue)
+GET /payments/{id}/receipt       (view the receipt image)
    ↓
 PATCH /payments/{id}/verify      → VERIFIED (+ activates subscription)
    or
@@ -154,7 +153,8 @@ PATCH /payments/{id}/reject { rejection_reason }
 
 | Status | Causes |
 |---|---|
-| 403 | Acting on another student's payment/reservation; non-student creating/submitting; student attempting verify/reject |
-| 404 | Payment/reservation/trip not found |
-| 409 | Active payment already exists for the reservation/subscription |
-| 422 | Terminal-status actions; submit without reference (digital); reservation not CONFIRMED; departed trip |
+| 401 | Unauthenticated receipt access. |
+| 403 | Acting on another student's payment; non-student uploading receipts; student attempting verify/reject. |
+| 404 | Payment not found; receipt not uploaded yet. |
+| 409 | Active payment already exists for the subscription. |
+| 422 | Terminal-status actions; digital verify without reference or receipt; CASH receipt upload; invalid image file; retired reservation-payment creation. |

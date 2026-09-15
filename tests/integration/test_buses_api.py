@@ -259,7 +259,6 @@ def test_delete_bus_fails_when_assigned_to_active_trip(
 ) -> None:
     from datetime import datetime, timezone, timedelta
     from app.models.route import Route
-    from app.models.station import Station
     from app.models.trip import Trip
 
     ceo_token = _create_user_and_token(db_session, "ceo_del_active@test.edu", RoleEnum.CEO)
@@ -273,7 +272,7 @@ def test_delete_bus_fails_when_assigned_to_active_trip(
     ).json()
     bus_id = created["id"]
 
-    # Create supervisor, stations, route, trip
+    # Create supervisor, route, directed trip
     sup = User(
         full_name="Sup Active",
         phone_number="+201011119999",
@@ -282,25 +281,17 @@ def test_delete_bus_fails_when_assigned_to_active_trip(
         role=RoleEnum.SUPERVISOR,
         is_active=True,
     )
-    s1 = Station(name="S1", code="ST-S1-BUS", latitude=30.0, longitude=31.0)
-    s2 = Station(name="S2", code="ST-S2-BUS", latitude=30.1, longitude=31.1)
-    db_session.add_all([sup, s1, s2])
+    db_session.add(sup)
     db_session.commit()
 
-    route = Route(
-        route_number="R-BUS-ACT",
-        name="Route Bus Act",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=20,
-    )
+    route = Route(name="Route Bus Act", is_active=True)
     db_session.add(route)
     db_session.commit()
 
     dep = datetime.now(timezone.utc) + timedelta(hours=2)
     trip = Trip(
         route_id=route.id,
+        direction="OUTBOUND",
         bus_id=bus_id,
         supervisor_id=sup.id,
         departure_time=dep,

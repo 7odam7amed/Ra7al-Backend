@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
 from app.models.enums import GenderEnum, RoleEnum
-from app.models.station import Station
 from app.models.user import User
 
 
@@ -29,149 +28,81 @@ def _create_user_and_token(
     return user, token
 
 
-def _create_test_stations(session: Session) -> list[Station]:
-    stations = [
-        Station(name="Station 1", code="ST-R-1", latitude=30.0, longitude=31.0),
-        Station(name="Station 2", code="ST-R-2", latitude=30.1, longitude=31.1),
-        Station(name="Station 3", code="ST-R-3", latitude=30.2, longitude=31.2),
-        Station(name="Station 4", code="ST-R-4", latitude=30.3, longitude=31.3),
-    ]
-    session.add_all(stations)
-    session.commit()
-    return stations
-
-
-def test_ceo_and_supervisor_can_create_route(
+def test_ceo_can_create_route_container(
     client_with_db: TestClient, db_session: Session
 ) -> None:
+    """A Route is only a named container of pickup points: no origin,
+    destination, distance, duration, or supervisor (spec §4/§7)."""
     _, ceo_token = _create_user_and_token(db_session, "ceo_route@test.edu", RoleEnum.CEO)
-    sup_user, sup_token = _create_user_and_token(db_session, "sup_route@test.edu", RoleEnum.SUPERVISOR)
-    stations = _create_test_stations(db_session)
 
-    # CEO creates route
     res_ceo = client_with_db.post(
         "/api/v1/routes",
-        json={
-            "route_number": "R-101",
-            "name": "Express Route",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[1].id,
-            "distance_km": 15.5,
-            "estimated_duration_minutes": 30,
-            "supervisor_id": sup_user.id,
-        },
+        json={"name": "Express Route"},
         headers={"Authorization": f"Bearer {ceo_token}"},
     )
     assert res_ceo.status_code == 201
     data_ceo = res_ceo.json()
     assert data_ceo["id"] is not None
-    assert data_ceo["route_number"] == "R-101"
-    assert data_ceo["supervisor_id"] == sup_user.id
+    assert data_ceo["name"] == "Express Route"
     assert data_ceo["is_active"] is True
 
-    # Supervisor creates route
-    res_sup = client_with_db.post(
-        "/api/v1/routes",
-        json={
-            "route_number": "R-102",
-            "name": "Local Route",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[2].id,
-            "distance_km": 8.0,
-            "estimated_duration_minutes": 20,
-        },
-        headers={"Authorization": f"Bearer {sup_token}"},
-    )
-    assert res_sup.status_code == 201
-    assert res_sup.json()["route_number"] == "R-102"
+    # Obsolete route fields must not exist on the API.
+    for obsolete in (
+        "route_number",
+        "origin_station_id",
+        "destination_station_id",
+        "distance_km",
+        "estimated_duration_minutes",
+        "supervisor_id",
+    ):
+        assert obsolete not in data_ceo, f"obsolete field {obsolete} exposed"
 
 
 def test_create_route_validations(
     client_with_db: TestClient, db_session: Session
 ) -> None:
     _, ceo_token = _create_user_and_token(db_session, "ceo_val_route@test.edu", RoleEnum.CEO)
-    student, _ = _create_user_and_token(db_session, "student_val_route@test.edu", RoleEnum.STUDENT)
-    stations = _create_test_stations(db_session)
+    _create_user_and_token(db_session, "student_val_route@test.edu", RoleEnum.STUDENT)
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Same origin and destination -> 422
-    res_same = client_with_db.post(
-        "/api/v1/routes",
-        json={
-            "route_number": "R-INV1",
-            "name": "Same",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[0].id,
-            "distance_km": 10.0,
-            "estimated_duration_minutes": 20,
-        },
-        headers=headers,
+    # Missing name -> 422
+    res_missing = client_with_db.post(
+        "/api/v1/routes", json={}, headers=headers
     )
-    assert res_same.status_code == 422
+    assert res_missing.status_code == 422
 
-    # Non-supervisor assigned -> 422
-    res_student_sup = client_with_db.post(
-        "/api/v1/routes",
-        json={
-            "route_number": "R-INV2",
-            "name": "Bad Sup",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[1].id,
-            "distance_km": 10.0,
-            "estimated_duration_minutes": 20,
-            "supervisor_id": student.id,
-        },
-        headers=headers,
+    # Duplicate route name -> 409
+    res_first = client_with_db.post(
+        "/api/v1/routes", json={"name": "Unique Route X"}, headers=headers
     )
-    assert res_student_sup.status_code == 422
-
-    # Missing station -> 404
-    res_missing_st = client_with_db.post(
-        "/api/v1/routes",
-        json={
-            "route_number": "R-INV3",
-            "name": "Missing",
-            "origin_station_id": 99999,
-            "destination_station_id": stations[1].id,
-            "distance_km": 10.0,
-            "estimated_duration_minutes": 20,
-        },
-        headers=headers,
+    assert res_first.status_code == 201
+    res_dup = client_with_db.post(
+        "/api/v1/routes", json={"name": "Unique Route X"}, headers=headers
     )
-    assert res_missing_st.status_code == 404
+    assert res_dup.status_code == 409
 
 
-def test_route_update_and_supervisor_assignment(
+def test_route_update_and_status(
     client_with_db: TestClient, db_session: Session
 ) -> None:
     _, ceo_token = _create_user_and_token(db_session, "ceo_upd_route@test.edu", RoleEnum.CEO)
-    sup_user, _ = _create_user_and_token(db_session, "sup_upd_route@test.edu", RoleEnum.SUPERVISOR)
-    stations = _create_test_stations(db_session)
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
     created = client_with_db.post(
         "/api/v1/routes",
-        json={
-            "route_number": "R-201",
-            "name": "Route 201",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[1].id,
-            "distance_km": 10.0,
-            "estimated_duration_minutes": 20,
-        },
+        json={"name": "Route 201"},
         headers=headers,
     ).json()
     route_id = created["id"]
 
-    # Update metadata
+    # Update name
     patch_res = client_with_db.patch(
         f"/api/v1/routes/{route_id}",
-        json={"name": "Route 201 Modified", "distance_km": 12.5},
+        json={"name": "Route 201 Modified"},
         headers=headers,
     )
     assert patch_res.status_code == 200
     assert patch_res.json()["name"] == "Route 201 Modified"
-    assert patch_res.json()["distance_km"] == 12.5
 
     # Update status
     status_res = client_with_db.patch(
@@ -182,97 +113,72 @@ def test_route_update_and_supervisor_assignment(
     assert status_res.status_code == 200
     assert status_res.json()["is_active"] is False
 
-    # Assign supervisor
-    sup_res = client_with_db.patch(
-        f"/api/v1/routes/{route_id}/supervisor",
-        json={"supervisor_id": sup_user.id},
-        headers=headers,
-    )
-    assert sup_res.status_code == 200
-    assert sup_res.json()["supervisor_id"] == sup_user.id
 
-
-def test_route_stops_full_lifecycle(
+def test_pickup_points_full_lifecycle(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, ceo_token = _create_user_and_token(db_session, "ceo_stops@test.edu", RoleEnum.CEO)
-    stations = _create_test_stations(db_session)
+    """Pickup points belong to exactly ONE route; no latitude/longitude."""
+    _, ceo_token = _create_user_and_token(db_session, "ceo_pp@test.edu", RoleEnum.CEO)
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
     route = client_with_db.post(
-        "/api/v1/routes",
-        json={
-            "route_number": "R-STOPS-API",
-            "name": "Stops Route",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[1].id,
-            "distance_km": 20.0,
-            "estimated_duration_minutes": 40,
-        },
-        headers=headers,
+        "/api/v1/routes", json={"name": "Points Route"}, headers=headers
     ).json()
     route_id = route["id"]
 
-    # Add stop 1
-    stop1_res = client_with_db.post(
-        f"/api/v1/routes/{route_id}/stops",
-        json={"station_id": stations[2].id, "stop_order": 1},
+    # Add point 1 (no latitude/longitude fields exist)
+    p1_res = client_with_db.post(
+        f"/api/v1/routes/{route_id}/pickup-points",
+        json={"name": "Al-Mahatta", "sequence": 1},
         headers=headers,
     )
-    assert stop1_res.status_code == 201
-    stop1 = stop1_res.json()
-    assert stop1["station_id"] == stations[2].id
-    assert stop1["stop_order"] == 1
+    assert p1_res.status_code == 201
+    p1 = p1_res.json()
+    assert p1["name"] == "Al-Mahatta"
+    assert p1["route_id"] == route_id
+    assert "latitude" not in p1
+    assert "longitude" not in p1
 
-    # Add stop 2
-    stop2_res = client_with_db.post(
-        f"/api/v1/routes/{route_id}/stops",
-        json={"station_id": stations[3].id, "stop_order": 2},
+    # Add point 2
+    p2_res = client_with_db.post(
+        f"/api/v1/routes/{route_id}/pickup-points",
+        json={"name": "Al-Walidiyah", "sequence": 2},
         headers=headers,
     )
-    assert stop2_res.status_code == 201
-    stop2 = stop2_res.json()
+    assert p2_res.status_code == 201
+    p2 = p2_res.json()
 
-    # List stops
-    list_stops_res = client_with_db.get(
-        f"/api/v1/routes/{route_id}/stops", headers=headers
-    )
-    assert list_stops_res.status_code == 200
-    assert len(list_stops_res.json()) == 2
-
-    # Reorder stops
-    reorder_res = client_with_db.patch(
-        f"/api/v1/routes/{route_id}/stops/reorder",
-        json={
-            "stops": [
-                {"route_stop_id": stop1["id"], "stop_order": 2},
-                {"route_stop_id": stop2["id"], "stop_order": 1},
-            ]
-        },
+    # Duplicate name on the same route -> 409
+    dup_res = client_with_db.post(
+        f"/api/v1/routes/{route_id}/pickup-points",
+        json={"name": "Al-Mahatta", "sequence": 3},
         headers=headers,
     )
-    assert reorder_res.status_code == 200
-    reordered = reorder_res.json()
-    assert reordered[0]["id"] == stop2["id"]
-    assert reordered[0]["stop_order"] == 1
-    assert reordered[1]["id"] == stop1["id"]
-    assert reordered[1]["stop_order"] == 2
+    assert dup_res.status_code == 409
 
-    # Update single stop
-    patch_stop_res = client_with_db.patch(
-        f"/api/v1/routes/{route_id}/stops/{stop1['id']}",
-        json={"stop_order": 5},
+    # List points
+    list_res = client_with_db.get(
+        f"/api/v1/routes/{route_id}/pickup-points", headers=headers
+    )
+    assert list_res.status_code == 200
+    assert [p["id"] for p in list_res.json()] == [p1["id"], p2["id"]]
+    assert [p["sequence"] for p in list_res.json()] == [1, 2]
+
+    # Update a point
+    patch_res = client_with_db.patch(
+        f"/api/v1/routes/{route_id}/pickup-points/{p1['id']}",
+        json={"name": "Al-Mahatta Renamed"},
         headers=headers,
     )
-    assert patch_stop_res.status_code == 200
-    assert patch_stop_res.json()["stop_order"] == 5
+    assert patch_res.status_code == 200
+    assert patch_res.json()["name"] == "Al-Mahatta Renamed"
 
-    # Delete stop
-    del_stop_res = client_with_db.delete(
-        f"/api/v1/routes/{route_id}/stops/{stop1['id']}",
+    # Delete point 2
+    del_res = client_with_db.delete(
+        f"/api/v1/routes/{route_id}/pickup-points/{p2['id']}",
         headers=headers,
     )
-    assert del_stop_res.status_code == 204
+    assert del_res.status_code == 204
 
     # Delete whole route
     del_route_res = client_with_db.delete(
@@ -284,58 +190,43 @@ def test_route_stops_full_lifecycle(
 def test_routes_rbac_rejections(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    """Route management is forbidden for students; read-only access is allowed.
-
-    Students need READ access to routes (and their stops) for the subscription
-    flow ("اشترك الآن"), but must never be able to create, update, or delete
-    routes or stops.
-    """
+    """Route management is CEO-only; students get READ access for the
+    transportation screens."""
     student, student_token = _create_user_and_token(db_session, "student_r_rbac@test.edu", RoleEnum.STUDENT)
     _, ceo_token = _create_user_and_token(db_session, "ceo_r_rbac@test.edu", RoleEnum.CEO)
-    stations = _create_test_stations(db_session)
     ceo_headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Seed a route and a stop so student READ requests can be exercised end-to-end
     created = client_with_db.post(
         "/api/v1/routes",
-        json={
-            "route_number": "R-RBAC",
-            "name": "RBAC Route",
-            "origin_station_id": stations[0].id,
-            "destination_station_id": stations[1].id,
-            "distance_km": 5.0,
-            "estimated_duration_minutes": 15,
-        },
+        json={"name": "RBAC Route"},
         headers=ceo_headers,
     )
     assert created.status_code == 201
     route_id = created.json()["id"]
 
-    stop = client_with_db.post(
-        f"/api/v1/routes/{route_id}/stops",
-        json={"station_id": stations[2].id, "stop_order": 1},
+    point = client_with_db.post(
+        f"/api/v1/routes/{route_id}/pickup-points",
+        json={"name": "RBAC Point", "sequence": 1},
         headers=ceo_headers,
     )
-    assert stop.status_code == 201
-    stop_id = stop.json()["id"]
+    assert point.status_code == 201
+    point_id = point.json()["id"]
 
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
-    # Student READ access -> allowed (required by the subscription flow)
+    # Student READ access -> allowed (required by the transportation screens)
     assert client_with_db.get("/api/v1/routes", headers=student_headers).status_code == 200
     assert client_with_db.get(f"/api/v1/routes/{route_id}", headers=student_headers).status_code == 200
-    assert client_with_db.get(f"/api/v1/routes/{route_id}/stops", headers=student_headers).status_code == 200
+    assert client_with_db.get(f"/api/v1/routes/{route_id}/pickup-points", headers=student_headers).status_code == 200
 
     # Student management access -> 403
     assert client_with_db.post("/api/v1/routes", json={}, headers=student_headers).status_code == 403
     assert client_with_db.patch(f"/api/v1/routes/{route_id}", json={}, headers=student_headers).status_code == 403
     assert client_with_db.patch(f"/api/v1/routes/{route_id}/status", json={}, headers=student_headers).status_code == 403
-    assert client_with_db.patch(f"/api/v1/routes/{route_id}/supervisor", json={}, headers=student_headers).status_code == 403
     assert client_with_db.delete(f"/api/v1/routes/{route_id}", headers=student_headers).status_code == 403
-    assert client_with_db.post(f"/api/v1/routes/{route_id}/stops", json={}, headers=student_headers).status_code == 403
-    assert client_with_db.patch(f"/api/v1/routes/{route_id}/stops/reorder", json={"stops": []}, headers=student_headers).status_code == 403
-    assert client_with_db.patch(f"/api/v1/routes/{route_id}/stops/{stop_id}", json={}, headers=student_headers).status_code == 403
-    assert client_with_db.delete(f"/api/v1/routes/{route_id}/stops/{stop_id}", headers=student_headers).status_code == 403
+    assert client_with_db.post(f"/api/v1/routes/{route_id}/pickup-points", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.patch(f"/api/v1/routes/{route_id}/pickup-points/{point_id}", json={}, headers=student_headers).status_code == 403
+    assert client_with_db.delete(f"/api/v1/routes/{route_id}/pickup-points/{point_id}", headers=student_headers).status_code == 403
 
     # Unauthenticated -> 401 (all endpoints, including reads)
     assert client_with_db.get("/api/v1/routes").status_code == 401
@@ -343,5 +234,5 @@ def test_routes_rbac_rejections(
     assert client_with_db.post("/api/v1/routes", json={}).status_code == 401
     assert client_with_db.patch(f"/api/v1/routes/{route_id}", json={}).status_code == 401
     assert client_with_db.delete(f"/api/v1/routes/{route_id}").status_code == 401
-    assert client_with_db.get(f"/api/v1/routes/{route_id}/stops").status_code == 401
-    assert client_with_db.post(f"/api/v1/routes/{route_id}/stops", json={}).status_code == 401
+    assert client_with_db.get(f"/api/v1/routes/{route_id}/pickup-points").status_code == 401
+    assert client_with_db.post(f"/api/v1/routes/{route_id}/pickup-points", json={}).status_code == 401

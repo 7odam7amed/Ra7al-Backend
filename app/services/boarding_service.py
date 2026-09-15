@@ -137,52 +137,34 @@ class BoardingService:
                 f"Subscription is not active (current status: {subscription.status.value})"
             )
 
-        # 6. Daily reservation authorization: the student must have selected
-        #    this trip for today (the trip's service date), and the selection
-        #    must cover the direction.
+        # 6. Daily reservation authorization: the student must hold a CONFIRMED
+        #    booking on THIS trip (one row per direction) for the trip's date,
+        #    and the scanned point must be the booking's selected point.
         service_date = trip_date
-        reservation = self.reservation_repo.get_active_for_student_and_date(
-            subscription.student_id, service_date
+        reservation = self.reservation_repo.get_active_for_student_date_direction(
+            subscription.student_id, service_date, data.direction
         )
         if reservation is None:
             raise ValidationError(
-                "No confirmed daily transportation selection found for this trip's date"
+                "No confirmed daily transportation booking found for this trip's date and direction"
             )
         if reservation.subscription_id != subscription.id:
             raise ValidationError(
-                "Daily transportation selection does not belong to this subscription"
+                "Daily transportation booking does not belong to this subscription"
             )
         if reservation.trip_id != trip.id:
             raise ValidationError(
-                "Daily transportation selection is not for this trip"
+                "Daily transportation booking is not for this trip"
             )
-        if data.direction == BoardingDirection.OUTBOUND:
-            if reservation.direction_mode == "RETURN_ONLY":
-                raise ValidationError(
-                    "Daily transportation selection does not include an outbound journey"
-                )
-            selected_point_id = reservation.outbound_pickup_point_id
-            if selected_point_id is None:
-                raise ValidationError(
-                    "Daily transportation selection has no outbound pickup point"
-                )
-        else:
-            if reservation.direction_mode == "OUTBOUND_ONLY":
-                raise ValidationError(
-                    "Daily transportation selection does not include a return journey"
-                )
-            selected_point_id = reservation.return_pickup_point_id
-            if selected_point_id is None:
-                raise ValidationError(
-                    "Daily transportation selection has no return pickup point"
-                )
+        selected_point_id = reservation.selected_pickup_point_id
         if data.pickup_point_id != selected_point_id:
             raise ValidationError(
                 "Scanned pickup point does not match the selected pickup point for this trip"
             )
 
-        pickup_point = self.pickup_point_repo.get_by_id(data.pickup_point_id)
-        if pickup_point is None or pickup_point.trip_id != trip.id:
+        # The scanned point must be one of the trip's configured stops.
+        stop_point_ids = {s.pickup_point_id for s in (trip.trip_stops or [])}
+        if data.pickup_point_id not in stop_point_ids:
             raise ValidationError("Scanned pickup point is not configured for this trip")
 
         # 7. Duplicate Boarding Check (prevent duplicate scan for same trip & direction)
@@ -328,8 +310,7 @@ class BoardingService:
         for reservation in reservations:
             student = reservation.student
             subscription = reservation.subscription
-            outbound_point = reservation.outbound_pickup_point
-            return_point = reservation.return_pickup_point
+            selected_point = reservation.selected_pickup_point
             students_response.append(
                 SupervisorTripStudentResponse(
                     student_id=student.id,
@@ -337,9 +318,8 @@ class BoardingService:
                     subscription_id=subscription.id,
                     subscription_status=subscription.status,
                     service_date=reservation.service_date,
-                    outbound_pickup=outbound_point.name if outbound_point else None,
-                    return_pickup=return_point.name if return_point else None,
-                    direction_mode=reservation.direction_mode,
+                    direction=reservation.direction.value,
+                    selected_point=selected_point.name if selected_point else None,
                     payment_status=subscription.payment.status if subscription.payment else None,
                     outbound_boarded=subscription.id in outbound_boarded_sub_ids,
                     return_boarded=subscription.id in return_boarded_sub_ids,

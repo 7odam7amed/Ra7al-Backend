@@ -52,8 +52,8 @@ Renew / expire      PATCH /api/v1/subscriptions/{id}/renew
 
 ## 5. Reservations
 
-- A reservation is the student's **daily transportation selection for TOMORROW** (`POST /reservations` with `trip_id` + outbound/return pickup points), independent of the subscription purchase.
-- Trips available for booking: `GET /reservations/available-trips`.
+- A reservation is a **directed booking**: ONE OUTBOUND trip (selecting a pickup point) and/or ONE RETURN trip (selecting a drop-off point) per service date (`POST /reservations` with `trip_id` + `selected_pickup_point_id`), independent of the subscription purchase. An ACTIVE subscription covering the service date is required.
+- Upcoming trips available for booking: `GET /reservations/upcoming-trips` (ALL upcoming SCHEDULED trips, not only tomorrow).
 - Details: [RESERVATIONS.md](RESERVATIONS.md).
 
 ## 6. Payments

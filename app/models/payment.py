@@ -100,6 +100,13 @@ class Payment(BaseModel):
         String(100),
         nullable=True,
     )
+    # Payment receipt image (required for DIGITAL payment methods). Stored via
+    # the storage abstraction in the private payment-receipts namespace and
+    # served only through authorized backend endpoints (signed URLs).
+    receipt_image_path: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
     notes: Mapped[str | None] = mapped_column(
         String(500),
         nullable=True,

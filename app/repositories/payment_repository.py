@@ -300,3 +300,12 @@ class PaymentRepository:
         self.db.commit()
         self.db.refresh(payment)
         return self.get_by_id(payment.id) or payment
+
+    def set_receipt_image(
+        self, payment: Payment, receipt_image_path: str
+    ) -> Payment:
+        """Persist the receipt image object reference for a payment."""
+        payment.receipt_image_path = receipt_image_path
+        self.db.commit()
+        self.db.refresh(payment)
+        return self.get_by_id(payment.id) or payment

@@ -1,14 +1,15 @@
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy.orm import Session
+from uuid import uuid4
 
 from app.core.security import create_access_token, hash_password
 from app.models.bus import Bus
-from app.models.enums import BusStatus, GenderEnum, RoleEnum, TripStatus
+from app.models.enums import BusStatus, GenderEnum, RoleEnum, TripDirection
+from app.models.pickup_point import PickupPoint
 from app.models.route import Route
-from app.models.station import Station
+from app.models.trip_stop import TripStop
 from app.models.user import User
 
 
@@ -36,31 +37,19 @@ def _create_user_and_token(
 
 
 def _setup_api_prerequisites(
-    session: Session,
+    session: Session, with_points: bool = True
 ) -> tuple[Route, Bus, User]:
-    s1 = Station(name="Origin API", code="ST-OR-API", latitude=30.0, longitude=31.0)
-    s2 = Station(name="Dest API", code="ST-DE-API", latitude=30.1, longitude=31.1)
-    session.add_all([s1, s2])
-    session.commit()
-
-    route = Route(
-        route_number="R-API-01",
-        name="Route API",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=18.0,
-        estimated_duration_minutes=35,
-        is_active=True,
-    )
+    suffix = uuid4().hex[:8]
+    route = Route(name=f"Route API {suffix}", is_active=True)
     bus = Bus(
-        bus_number="BUS-API-1",
-        license_plate="API-001",
+        bus_number=f"BUS-API-{suffix}",
+        license_plate=f"API-{suffix}",
         capacity=50,
         status=BusStatus.ACTIVE,
     )
     supervisor = User(
         full_name="Supervisor API",
-        phone_number="+201000000001",
+        phone_number=f"+2010{int(suffix, 16) % 100000000:08d}",
         password_hash=hash_password("Password123!"),
         gender=GenderEnum.MALE,
         role=RoleEnum.SUPERVISOR,
@@ -68,7 +57,45 @@ def _setup_api_prerequisites(
     )
     session.add_all([route, bus, supervisor])
     session.commit()
+
+    if with_points:
+        p1 = PickupPoint(route_id=route.id, name="Point API 1", sequence=1)
+        p2 = PickupPoint(route_id=route.id, name="Point API 2", sequence=2)
+        session.add_all([p1, p2])
+        session.commit()
     return route, bus, supervisor
+
+
+def _trip_payload(
+    route: Route,
+    bus: Bus,
+    supervisor: User,
+    start_hour: int = 10,
+    end_hour: int = 12,
+    direction: TripDirection = TripDirection.OUTBOUND,
+) -> dict:
+    """Stops reference the route's own points; times derive departure/arrival."""
+    day = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    points = sorted(route.pickup_points, key=lambda p: p.sequence) or []
+    assert len(points) >= 2, "prerequisite route needs two pickup points"
+    return {
+        "route_id": route.id,
+        "direction": direction.value,
+        "bus_id": bus.id,
+        "supervisor_id": supervisor.id,
+        "stops": [
+            {
+                "pickup_point_id": points[0].id,
+                "stop_order": 1,
+                "departure_time": day.replace(hour=start_hour).isoformat(),
+            },
+            {
+                "pickup_point_id": points[1].id,
+                "stop_order": 2,
+                "departure_time": day.replace(hour=end_hour).isoformat(),
+            },
+        ],
+    }
 
 
 def test_unauthenticated_requests_rejected(client_with_db: TestClient) -> None:
@@ -92,15 +119,7 @@ def test_rbac_access_control(
         db_session, "std_trip@test.edu", RoleEnum.STUDENT
     )
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc).isoformat()
-    payload = {
-        "route_id": route.id,
-        "bus_id": bus.id,
-        "supervisor_id": supervisor.id,
-        "departure_time": t_dep,
-        "estimated_arrival_time": t_arr,
-    }
+    payload = _trip_payload(route, bus, supervisor)
 
     # Student forbidden from creating trip (403)
     res_std = client_with_db.post(
@@ -125,6 +144,13 @@ def test_rbac_access_control(
         headers={"Authorization": f"Bearer {ceo_token}"},
     )
     assert res_ceo.status_code == 201
+    data = res_ceo.json()
+    assert data["direction"] == "OUTBOUND"
+    # Derived times: first stop = departure, last stop = arrival.
+    assert data["departure_time"].startswith("2026-08-20T10:00")
+    assert data["estimated_arrival_time"].startswith("2026-08-20T12:00")
+    # No fare exists on trips.
+    assert "fare_amount" not in data
 
     # Supervisor allowed to list trips (200)
     res_sup_list = client_with_db.get(
@@ -141,134 +167,84 @@ def test_create_trip_validations(
     _, ceo_token = _create_user_and_token(db_session, "ceo_val@test.edu", RoleEnum.CEO)
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc).isoformat()
-
     # 1. Nonexistent route -> 404
-    res1 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": 999999,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
-    )
+    foreign_route_payload = _trip_payload(route, bus, supervisor)
+    foreign_route_payload["route_id"] = 999999
+    res1 = client_with_db.post("/api/v1/trips", json=foreign_route_payload, headers=headers)
     assert res1.status_code == 404
 
     # 2. Inactive route -> 422
     route.is_active = False
     db_session.commit()
     res2 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
+        "/api/v1/trips", json=_trip_payload(route, bus, supervisor), headers=headers
     )
     assert res2.status_code == 422
     route.is_active = True
     db_session.commit()
 
     # 3. Nonexistent bus -> 404
-    res3 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": 999999,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
-    )
+    payload = _trip_payload(route, bus, supervisor)
+    payload["bus_id"] = 999999
+    res3 = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
     assert res3.status_code == 404
 
     # 4. Inactive bus -> 422
     bus.status = BusStatus.INACTIVE
     db_session.commit()
     res4 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
+        "/api/v1/trips", json=_trip_payload(route, bus, supervisor), headers=headers
     )
     assert res4.status_code == 422
     bus.status = BusStatus.ACTIVE
     db_session.commit()
 
     # 5. Nonexistent supervisor -> 404
-    res5 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": 999999,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
-    )
+    payload = _trip_payload(route, bus, supervisor)
+    payload["supervisor_id"] = 999999
+    res5 = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
     assert res5.status_code == 404
 
     # 6. Student as supervisor -> 422
     student, _ = _create_user_and_token(
         db_session, "student_as_sup@test.edu", RoleEnum.STUDENT
     )
-    res6 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": student.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
-    )
+    payload = _trip_payload(route, bus, supervisor)
+    payload["supervisor_id"] = student.id
+    res6 = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
     assert res6.status_code == 422
 
     # 7. Inactive supervisor -> 422
     inactive_sup, _ = _create_user_and_token(
         db_session, "inact_sup@test.edu", RoleEnum.SUPERVISOR, is_active=False
     )
-    res_inact_sup = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": inactive_sup.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers,
-    )
+    payload = _trip_payload(route, bus, supervisor)
+    payload["supervisor_id"] = inactive_sup.id
+    res_inact_sup = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
     assert res_inact_sup.status_code == 422
 
-    # 8. arrival <= departure -> 422
-    res7 = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_arr,
-            "estimated_arrival_time": t_dep,
-        },
-        headers=headers,
-    )
-    assert res7.status_code == 422
+    # 8. Stop from another route -> 422
+    other_route, other_bus, other_sup = _setup_api_prerequisites(db_session)
+    foreign_point = db_session.query(PickupPoint).filter(
+        PickupPoint.route_id == other_route.id
+    ).first()
+    payload = _trip_payload(route, bus, supervisor)
+    payload["stops"][0]["pickup_point_id"] = foreign_point.id
+    res_foreign = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
+    assert res_foreign.status_code == 422
+    assert "does not belong to route" in res_foreign.json()["detail"]
+
+    # 9. Duplicate stop order -> 422
+    payload = _trip_payload(route, bus, supervisor)
+    payload["stops"][1]["stop_order"] = 1
+    res_dup_order = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
+    assert res_dup_order.status_code == 422
+
+    # 10. Missing direction -> 422
+    payload = _trip_payload(route, bus, supervisor)
+    payload.pop("direction")
+    res_no_dir = client_with_db.post("/api/v1/trips", json=payload, headers=headers)
+    assert res_no_dir.status_code == 422
 
 
 def test_bus_and_supervisor_conflicts_via_api(
@@ -280,19 +256,10 @@ def test_bus_and_supervisor_conflicts_via_api(
     )
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    # Initial Trip: 10:00 -> 12:00
-    t1_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
-    t1_arr = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc).isoformat()
-
+    # Initial Trip: 10:00 -> 12:00 (via stop times)
     res_init = client_with_db.post(
         "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t1_dep,
-            "estimated_arrival_time": t1_arr,
-        },
+        json=_trip_payload(route, bus, supervisor, start_hour=10, end_hour=12),
         headers=headers,
     )
     assert res_init.status_code == 201
@@ -303,17 +270,7 @@ def test_bus_and_supervisor_conflicts_via_api(
     )
     res_bus_conf = client_with_db.post(
         "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor2.id,
-            "departure_time": datetime(
-                2026, 8, 20, 11, 0, tzinfo=timezone.utc
-            ).isoformat(),
-            "estimated_arrival_time": datetime(
-                2026, 8, 20, 13, 0, tzinfo=timezone.utc
-            ).isoformat(),
-        },
+        json=_trip_payload(route, bus, supervisor2, start_hour=11, end_hour=13),
         headers=headers,
     )
     assert res_bus_conf.status_code == 409
@@ -330,17 +287,9 @@ def test_bus_and_supervisor_conflicts_via_api(
 
     res_sup_conf = client_with_db.post(
         "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus2.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": datetime(
-                2026, 8, 20, 9, 0, tzinfo=timezone.utc
-            ).isoformat(),
-            "estimated_arrival_time": datetime(
-                2026, 8, 20, 11, 0, tzinfo=timezone.utc
-            ).isoformat(),
-        },
+        json=_trip_payload(
+            route, bus2, supervisor, start_hour=9, end_hour=11
+        ),
         headers=headers,
     )
     assert res_sup_conf.status_code == 409
@@ -348,17 +297,9 @@ def test_bus_and_supervisor_conflicts_via_api(
     # Adjacent Trip: 12:00 -> 14:00 -> 201 Created (No conflict)
     res_adj = client_with_db.post(
         "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": datetime(
-                2026, 8, 20, 12, 0, tzinfo=timezone.utc
-            ).isoformat(),
-            "estimated_arrival_time": datetime(
-                2026, 8, 20, 14, 0, tzinfo=timezone.utc
-            ).isoformat(),
-        },
+        json=_trip_payload(
+            route, bus, supervisor, start_hour=12, end_hour=14
+        ),
         headers=headers,
     )
     assert res_adj.status_code == 201
@@ -376,30 +317,22 @@ def test_trip_crud_and_status_lifecycle_via_api(
     )
     headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc).isoformat()
-
-    # 1. Create Trip
+    # 1. Create Trip (capacity + allow_overbooking per spec §12)
     res_create = client_with_db.post(
         "/api/v1/trips",
         json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
+            **_trip_payload(route, bus, supervisor, start_hour=10, end_hour=12),
             "passenger_capacity": 45,
-            "fare_amount": 60.0,
-            "pickup_points": [
-                {"name": "Pickup 1", "address": "Station 1", "sequence": 1},
-                {"name": "Pickup 2", "address": "Station 2", "sequence": 2},
-            ],
+            "allow_overbooking": True,
         },
         headers=headers,
     )
     assert res_create.status_code == 201
     trip_id = res_create.json()["id"]
-    assert len(res_create.json()["pickup_points"]) == 2
+    assert len(res_create.json()["trip_stops"]) == 2
+    assert res_create.json()["allow_overbooking"] is True
+    assert [s["stop_order"] for s in res_create.json()["trip_stops"]] == [1, 2]
+    assert all(s["departure_time"] for s in res_create.json()["trip_stops"])
 
     # 2. Get Trip Details (Supervisor can view)
     res_get = client_with_db.get(
@@ -413,7 +346,7 @@ def test_trip_crud_and_status_lifecycle_via_api(
     assert data["bus"]["id"] == bus.id
     assert data["supervisor"]["id"] == supervisor.id
     assert "password_hash" not in data["supervisor"]
-    assert len(data["pickup_points"]) == 2
+    assert len(data["trip_stops"]) == 2
 
     # 3. List Trips
     res_list = client_with_db.get(
@@ -424,14 +357,15 @@ def test_trip_crud_and_status_lifecycle_via_api(
     assert list_data["total"] >= 1
     assert len(list_data["items"]) >= 1
 
-    # 4. Patch Trip (Update capacity)
+    # 4. Patch Trip (Update capacity + overbooking)
     res_patch = client_with_db.patch(
         f"/api/v1/trips/{trip_id}",
-        json={"passenger_capacity": 38},
+        json={"passenger_capacity": 38, "allow_overbooking": False},
         headers=headers,
     )
     assert res_patch.status_code == 200
     assert res_patch.json()["passenger_capacity"] == 38
+    assert res_patch.json()["allow_overbooking"] is False
 
     # 5. Status Transitions: SCHEDULED -> IN_PROGRESS -> COMPLETED
     res_prog = client_with_db.patch(
@@ -458,106 +392,29 @@ def test_trip_crud_and_status_lifecycle_via_api(
     )
     assert res_inv.status_code == 422
 
-    # 6. Delete Trip
+    # 6. Get Deleted Trip -> 404 (trips remain; only CEO hard-delete here)
     res_del = client_with_db.delete(f"/api/v1/trips/{trip_id}", headers=headers)
     assert res_del.status_code == 204
-
-    # 7. Get Deleted Trip -> 404
     res_after_del = client_with_db.get(
         f"/api/v1/trips/{trip_id}", headers=headers
     )
     assert res_after_del.status_code == 404
 
 
-def test_pickup_points_sub_routes(
+def test_route_points_endpoint(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    route, bus, supervisor = _setup_api_prerequisites(db_session)
+    """CEO retrieves a route's registered points before creating a trip."""
+    route, _bus, _supervisor = _setup_api_prerequisites(db_session)
     _, ceo_token = _create_user_and_token(
         db_session, "ceo_pts@test.edu", RoleEnum.CEO
     )
-    _, sup_token = _create_user_and_token(
-        db_session, "sup_pts@test.edu", RoleEnum.SUPERVISOR
-    )
-    headers_ceo = {"Authorization": f"Bearer {ceo_token}"}
-    headers_sup = {"Authorization": f"Bearer {sup_token}"}
+    headers = {"Authorization": f"Bearer {ceo_token}"}
 
-    t_dep = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc).isoformat()
-    t_arr = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc).isoformat()
-
-    # Create Trip
-    res_create = client_with_db.post(
-        "/api/v1/trips",
-        json={
-            "route_id": route.id,
-            "bus_id": bus.id,
-            "supervisor_id": supervisor.id,
-            "departure_time": t_dep,
-            "estimated_arrival_time": t_arr,
-        },
-        headers=headers_ceo,
+    res_points = client_with_db.get(
+        f"/api/v1/routes/{route.id}/pickup-points", headers=headers
     )
-    trip_id = res_create.json()["id"]
-
-    # 1. Add pickup point (CEO only)
-    res_pt1 = client_with_db.post(
-        f"/api/v1/trips/{trip_id}/pickup-points",
-        json={"name": "Gathering Spot A", "address": "Main St 10", "sequence": 1},
-        headers=headers_ceo,
-    )
-    assert res_pt1.status_code == 201
-    pt1_id = res_pt1.json()["id"]
-    assert res_pt1.json()["name"] == "Gathering Spot A"
-    assert res_pt1.json()["sequence"] == 1
-
-    # Supervisor forbidden to add pickup point (403)
-    res_sup_add = client_with_db.post(
-        f"/api/v1/trips/{trip_id}/pickup-points",
-        json={"name": "Gathering Spot B", "sequence": 2},
-        headers=headers_sup,
-    )
-    assert res_sup_add.status_code == 403
-
-    # Add second pickup point
-    res_pt2 = client_with_db.post(
-        f"/api/v1/trips/{trip_id}/pickup-points",
-        json={"name": "Gathering Spot B", "address": "Campus Gate", "sequence": 2},
-        headers=headers_ceo,
-    )
-    assert res_pt2.status_code == 201
-    pt2_id = res_pt2.json()["id"]
-
-    # 2. List pickup points (Supervisor & CEO can view)
-    res_list = client_with_db.get(
-        f"/api/v1/trips/{trip_id}/pickup-points",
-        headers=headers_sup,
-    )
-    assert res_list.status_code == 200
-    points = res_list.json()
+    assert res_points.status_code == 200
+    points = res_points.json()
     assert len(points) == 2
-    assert points[0]["sequence"] == 1
-    assert points[1]["sequence"] == 2
-
-    # 3. Patch pickup point (CEO only)
-    res_patch = client_with_db.patch(
-        f"/api/v1/trips/{trip_id}/pickup-points/{pt1_id}",
-        json={"name": "Updated Gathering Spot A"},
-        headers=headers_ceo,
-    )
-    assert res_patch.status_code == 200
-    assert res_patch.json()["name"] == "Updated Gathering Spot A"
-
-    # 4. Delete pickup point (CEO only)
-    res_del = client_with_db.delete(
-        f"/api/v1/trips/{trip_id}/pickup-points/{pt1_id}",
-        headers=headers_ceo,
-    )
-    assert res_del.status_code == 204
-
-    # List remaining points
-    res_remaining = client_with_db.get(
-        f"/api/v1/trips/{trip_id}/pickup-points",
-        headers=headers_sup,
-    )
-    assert len(res_remaining.json()) == 1
-    assert res_remaining.json()[0]["id"] == pt2_id
+    assert [p["sequence"] for p in points] == [1, 2]

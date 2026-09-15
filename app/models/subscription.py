@@ -106,16 +106,6 @@ class Subscription(BaseModel):
         index=True,
         nullable=False,
     )
-    # Legacy pickup-point selection columns (pre-refactor), kept for historical
-    # rows; new subscriptions leave them NULL.
-    outbound_pickup_point_id: Mapped[int | None] = mapped_column(
-        ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    return_pickup_point_id: Mapped[int | None] = mapped_column(
-        ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
     payment_id: Mapped[int | None] = mapped_column(
         ForeignKey("payments.id", ondelete="SET NULL", use_alter=True, name="fk_subscriptions_payment_id"),
         index=True,

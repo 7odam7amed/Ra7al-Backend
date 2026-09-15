@@ -18,8 +18,8 @@ def _alembic_versions_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
-def test_migration_016_is_current_head() -> None:
-    """016 must be the single Alembic head reachable from the chain."""
+def test_migration_017_is_current_head() -> None:
+    """017 must be the single Alembic head reachable from the chain."""
     revisions: dict[str, str | None] = {}
     for path in _alembic_versions_dir().glob("*.py"):
         content = path.read_text(encoding="utf-8")
@@ -38,11 +38,21 @@ def test_migration_016_is_current_head() -> None:
     assert revisions["015_subscription_selection"] == "014_bus_image_flexible_plans"
     assert "016_daily_flexible_duration" in revisions
     assert revisions["016_daily_flexible_duration"] == "015_subscription_selection"
+    assert "017_transportation_refactor" in revisions
+    assert revisions["017_transportation_refactor"] == "016_daily_flexible_duration"
+    assert "018_drop_subscription_points" in revisions
+    assert revisions["018_drop_subscription_points"] == "017_transportation_refactor"
 
-    # Single head: no revision besides 016 may be un-referenced as a down_revision
+    # Single head: no revision besides 018 may be un-referenced as a down_revision
     referenced = {d for d in revisions.values() if d is not None}
     heads = [r for r in revisions if r not in referenced]
-    assert heads == ["016_daily_flexible_duration"]
+    assert heads == ["018_drop_subscription_points"]
+
+    # alembic_version.version_num is VARCHAR(32): every revision id must fit
+    for revision_id in revisions:
+        assert len(revision_id) <= 32, (
+            f"Revision id '{revision_id}' exceeds 32 characters"
+        )
 
 
 def test_migration_014_upgrade_adds_image_url_non_destructively() -> None:

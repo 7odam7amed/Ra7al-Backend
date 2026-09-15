@@ -130,23 +130,18 @@ def test_station_repository_update_and_delete(db_session: Session) -> None:
 
 
 def test_station_repository_is_referenced_by_routes(db_session: Session) -> None:
+    """Routes no longer reference stations (post-refactor: Route is a container
+    of pickup points), so is_referenced_by_routes is always False."""
     repo = StationRepository(db_session)
     s1 = repo.create("Origin", "ST-O", None, 30.0, 31.0)
     s2 = repo.create("Destination", "ST-D", None, 30.1, 31.1)
 
     assert repo.is_referenced_by_routes(s1.id) is False
 
-    # Attach route
-    route = Route(
-        route_number="R-TEST",
-        name="Test Route",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=20,
-    )
+    # Routes exist but reference no stations.
+    route = Route(name="Test Route")
     db_session.add(route)
     db_session.commit()
 
-    assert repo.is_referenced_by_routes(s1.id) is True
-    assert repo.is_referenced_by_routes(s2.id) is True
+    assert repo.is_referenced_by_routes(s1.id) is False
+    assert repo.is_referenced_by_routes(s2.id) is False

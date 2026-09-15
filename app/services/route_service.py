@@ -1,88 +1,47 @@
 from app.exceptions.base import ConflictError, NotFoundError, ValidationError
-from app.models.enums import RoleEnum
+from app.models.pickup_point import PickupPoint
 from app.models.route import Route
-from app.models.route_stop import RouteStop
-from app.models.user import User
+from app.repositories.pickup_point_repository import PickupPointRepository
+from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.route_repository import RouteRepository
-from app.repositories.route_stop_repository import RouteStopRepository
-from app.repositories.station_repository import StationRepository
-from app.repositories.user_repository import UserRepository
-from app.schemas.route import RouteCreateRequest, RouteUpdateRequest
-from app.schemas.route_stop import (
-    RouteStopCreateRequest,
-    RouteStopReorderRequest,
-    RouteStopUpdateRequest,
+from app.repositories.trip_stop_repository import TripStopRepository
+from app.schemas.pickup_point import (
+    PickupPointCreateRequest,
+    PickupPointUpdateRequest,
 )
+from app.schemas.route import RouteCreateRequest, RouteUpdateRequest
 
 
 class RouteService:
-    """Service handling route operations, station connections, supervisor assignment, and stop ordering."""
+    """Service handling routes as containers of pickup points.
+
+    A route carries no origin/destination/distance/duration/supervisor. All
+    pickup points referenced by trips or bookings must come from one route:
+    a point belongs to exactly one route and is never silently moved.
+    """
 
     def __init__(
         self,
         route_repo: RouteRepository,
-        station_repo: StationRepository,
-        user_repo: UserRepository,
-        route_stop_repo: RouteStopRepository,
+        pickup_point_repo: PickupPointRepository,
+        trip_stop_repo: TripStopRepository | None = None,
+        reservation_repo: ReservationRepository | None = None,
     ) -> None:
         self.route_repo = route_repo
-        self.station_repo = station_repo
-        self.user_repo = user_repo
-        self.route_stop_repo = route_stop_repo
+        self.pickup_point_repo = pickup_point_repo
+        self.trip_stop_repo = trip_stop_repo
+        self.reservation_repo = reservation_repo
 
-    def validate_supervisor(self, supervisor_id: int) -> User:
-        """Verify supervisor existence, role, and active state."""
-        user = self.user_repo.get_by_id(supervisor_id)
-        if not user:
-            raise NotFoundError(f"Supervisor with ID {supervisor_id} not found")
-        if user.role != RoleEnum.SUPERVISOR:
-            raise ValidationError(
-                f"User {supervisor_id} does not have SUPERVISOR role (current: {user.role.value})"
-            )
-        if not user.is_active:
-            raise ValidationError(
-                f"Supervisor with ID {supervisor_id} is inactive"
-            )
-        return user
+    # --- Route CRUD ---
 
     def create_route(self, data: RouteCreateRequest) -> Route:
-        """Create a new route with station validation and supervisor role verification."""
-        if self.route_repo.exists_by_route_number(data.route_number):
-            raise ConflictError(
-                f"A route with number '{data.route_number}' already exists"
-            )
-
-        if data.origin_station_id == data.destination_station_id:
-            raise ValidationError("Origin and destination cannot be the same station")
-
-        origin = self.station_repo.get_by_id(data.origin_station_id)
-        if not origin:
-            raise NotFoundError(
-                f"Origin station with ID {data.origin_station_id} not found"
-            )
-
-        destination = self.station_repo.get_by_id(data.destination_station_id)
-        if not destination:
-            raise NotFoundError(
-                f"Destination station with ID {data.destination_station_id} not found"
-            )
-
-        if data.supervisor_id is not None:
-            self.validate_supervisor(data.supervisor_id)
-
-        return self.route_repo.create(
-            route_number=data.route_number,
-            name=data.name,
-            origin_station_id=data.origin_station_id,
-            destination_station_id=data.destination_station_id,
-            distance_km=data.distance_km,
-            estimated_duration_minutes=data.estimated_duration_minutes,
-            supervisor_id=data.supervisor_id,
-            is_active=True,
-        )
+        """Create a new route container with a unique name."""
+        if self.route_repo.exists_by_name(data.name):
+            raise ConflictError(f"A route named '{data.name}' already exists")
+        return self.route_repo.create(name=data.name, is_active=True)
 
     def get_route_by_id(self, route_id: int) -> Route:
-        """Fetch a single route with all relationships loaded or raise NotFoundError."""
+        """Fetch a single route with its pickup points or raise NotFoundError."""
         route = self.route_repo.get_by_id(route_id)
         if not route:
             raise NotFoundError(f"Route with ID {route_id} not found")
@@ -93,7 +52,6 @@ class RouteService:
         page: int = 1,
         page_size: int = 20,
         is_active: bool | None = None,
-        supervisor_id: int | None = None,
         search: str | None = None,
     ) -> tuple[list[Route], int]:
         """Retrieve a paginated list of routes with optional filters."""
@@ -106,174 +64,107 @@ class RouteService:
             page=page,
             page_size=page_size,
             is_active=is_active,
-            supervisor_id=supervisor_id,
             search=search,
         )
 
     def update_route(self, route_id: int, data: RouteUpdateRequest) -> Route:
-        """Update route metadata with full consistency validation."""
+        """Update route metadata."""
         route = self.get_route_by_id(route_id)
-
-        if data.route_number is not None and self.route_repo.exists_by_route_number(
-            data.route_number, exclude_id=route_id
+        if data.name is not None and self.route_repo.exists_by_name(
+            data.name, exclude_id=route_id
         ):
-            raise ConflictError(
-                f"A route with number '{data.route_number}' already exists"
-            )
-
-        new_origin = (
-            data.origin_station_id
-            if data.origin_station_id is not None
-            else route.origin_station_id
-        )
-        new_dest = (
-            data.destination_station_id
-            if data.destination_station_id is not None
-            else route.destination_station_id
-        )
-
-        if new_origin == new_dest:
-            raise ValidationError("Origin and destination cannot be the same station")
-
-        if data.origin_station_id is not None:
-            if not self.station_repo.get_by_id(data.origin_station_id):
-                raise NotFoundError(
-                    f"Origin station with ID {data.origin_station_id} not found"
-                )
-
-        if data.destination_station_id is not None:
-            if not self.station_repo.get_by_id(data.destination_station_id):
-                raise NotFoundError(
-                    f"Destination station with ID {data.destination_station_id} not found"
-                )
-
-        if data.supervisor_id is not None:
-            self.validate_supervisor(data.supervisor_id)
-
-        return self.route_repo.update(
-            route=route,
-            route_number=data.route_number,
-            name=data.name,
-            origin_station_id=data.origin_station_id,
-            destination_station_id=data.destination_station_id,
-            distance_km=data.distance_km,
-            estimated_duration_minutes=data.estimated_duration_minutes,
-            supervisor_id=data.supervisor_id,
-        )
+            raise ConflictError(f"A route named '{data.name}' already exists")
+        return self.route_repo.update(route, name=data.name)
 
     def update_route_status(self, route_id: int, is_active: bool) -> Route:
         """Activate or deactivate a route."""
         route = self.get_route_by_id(route_id)
         return self.route_repo.update(route, is_active=is_active)
 
-    def assign_supervisor(
-        self, route_id: int, supervisor_id: int | None
-    ) -> Route:
-        """Assign or reassign a verified supervisor to a route."""
-        route = self.get_route_by_id(route_id)
-
-        if supervisor_id is not None:
-            self.validate_supervisor(supervisor_id)
-
-        return self.route_repo.set_supervisor(route, supervisor_id)
-
     def delete_route(self, route_id: int) -> None:
-        """Delete a route and cascade-delete its stops."""
+        """Delete a route and cascade-delete its pickup points."""
         route = self.get_route_by_id(route_id)
         self.route_repo.delete(route)
 
-    # --- Route Stops Operations ---
+    # --- Pickup Point management within a route ---
 
-    def add_stop(
-        self, route_id: int, data: RouteStopCreateRequest
-    ) -> RouteStop:
-        """Add an ordered intermediate stop to a route."""
+    def add_pickup_point(
+        self, route_id: int, data: PickupPointCreateRequest
+    ) -> PickupPoint:
+        """Add a pickup point to a route.
+
+        A point belongs to exactly ONE route: the owning route comes from the
+        URL path (the body may echo it, which must match), and a duplicate
+        name on the same route is rejected. Points are never silently moved
+        between routes.
+        """
+        if data.route_id is not None and data.route_id != route_id:
+            raise ValidationError(
+                "route_id in the request body must match the route in the URL path"
+            )
         self.get_route_by_id(route_id)
 
-        station = self.station_repo.get_by_id(data.station_id)
-        if not station:
-            raise NotFoundError(
-                f"Station with ID {data.station_id} not found"
-            )
-
-        if self.route_stop_repo.exists_for_route(route_id, data.station_id):
+        if self.pickup_point_repo.exists_for_route(route_id, data.name):
             raise ConflictError(
-                f"Station {data.station_id} is already added as a stop in route {route_id}"
+                f"A pickup point named '{data.name}' already exists on route {route_id}"
             )
 
-        if self.route_stop_repo.exists_stop_order(route_id, data.stop_order):
-            raise ConflictError(
-                f"Stop order {data.stop_order} is already occupied for route {route_id}"
-            )
-
-        return self.route_stop_repo.create(
+        return self.pickup_point_repo.create(
             route_id=route_id,
-            station_id=data.station_id,
-            stop_order=data.stop_order,
+            name=data.name,
+            address=data.address,
+            sequence=data.sequence,
         )
 
-    def get_route_stops(self, route_id: int) -> list[RouteStop]:
-        """Fetch all stops belonging to a route ordered by sequence."""
+    def get_route_pickup_points(self, route_id: int) -> list[PickupPoint]:
+        """Fetch all pickup points belonging to a route ordered by sequence."""
         self.get_route_by_id(route_id)
-        return self.route_stop_repo.list_by_route(route_id)
+        return self.pickup_point_repo.list_by_route(route_id)
 
-    def update_stop(
-        self, route_id: int, route_stop_id: int, data: RouteStopUpdateRequest
-    ) -> RouteStop:
-        """Update stop order of a specific route stop."""
+    def update_pickup_point(
+        self, route_id: int, point_id: int, data: PickupPointUpdateRequest
+    ) -> PickupPoint:
+        """Update a pickup point (route ownership is immutable)."""
         self.get_route_by_id(route_id)
-
-        route_stop = self.route_stop_repo.get_by_id(route_stop_id)
-        if not route_stop or route_stop.route_id != route_id:
+        point = self.pickup_point_repo.get_by_id(point_id)
+        if not point or point.route_id != route_id:
             raise NotFoundError(
-                f"Route stop with ID {route_stop_id} not found on route {route_id}"
+                f"Pickup point with ID {point_id} not found on route {route_id}"
             )
 
-        if self.route_stop_repo.exists_stop_order(
-            route_id, data.stop_order, exclude_id=route_stop_id
+        if data.name is not None and data.name != point.name:
+            if self.pickup_point_repo.exists_for_route(route_id, data.name):
+                raise ConflictError(
+                    f"A pickup point named '{data.name}' already exists on route {route_id}"
+                )
+
+        return self.pickup_point_repo.update(
+            point=point,
+            name=data.name,
+            address=data.address,
+            sequence=data.sequence,
+        )
+
+    def delete_pickup_point(self, route_id: int, point_id: int) -> None:
+        """Delete a pickup point unless it is referenced by trips or bookings."""
+        self.get_route_by_id(route_id)
+        point = self.pickup_point_repo.get_by_id(point_id)
+        if not point or point.route_id != route_id:
+            raise NotFoundError(
+                f"Pickup point with ID {point_id} not found on route {route_id}"
+            )
+
+        if self.trip_stop_repo is not None and self.trip_stop_repo.exists_for_point(point_id):
+            raise ConflictError(
+                f"Pickup point {point_id} is used by one or more trips and cannot be deleted"
+            )
+
+        if (
+            self.reservation_repo is not None
+            and self.reservation_repo.count_for_pickup_point(point_id) > 0
         ):
             raise ConflictError(
-                f"Stop order {data.stop_order} is already occupied on route {route_id}"
+                f"Pickup point {point_id} is referenced by student bookings and cannot be deleted"
             )
 
-        return self.route_stop_repo.update(
-            route_stop=route_stop, stop_order=data.stop_order
-        )
-
-    def remove_stop(self, route_id: int, route_stop_id: int) -> None:
-        """Remove a stop from a route."""
-        self.get_route_by_id(route_id)
-
-        route_stop = self.route_stop_repo.get_by_id(route_stop_id)
-        if not route_stop or route_stop.route_id != route_id:
-            raise NotFoundError(
-                f"Route stop with ID {route_stop_id} not found on route {route_id}"
-            )
-
-        self.route_stop_repo.delete(route_stop)
-
-    def reorder_stops(
-        self, route_id: int, data: RouteStopReorderRequest
-    ) -> list[RouteStop]:
-        """Batch reorder stops on a route with uniqueness and existence checks."""
-        self.get_route_by_id(route_id)
-
-        current_stops = self.route_stop_repo.list_by_route(route_id)
-        current_map = {s.id: s for s in current_stops}
-
-        requested_ids = [item.route_stop_id for item in data.stops]
-        if len(requested_ids) != len(set(requested_ids)):
-            raise ValidationError("Duplicate stop IDs in reorder request")
-
-        missing_ids = set(requested_ids) - set(current_map.keys())
-        if missing_ids:
-            raise NotFoundError(
-                f"Route stops {missing_ids} do not belong to route {route_id}"
-            )
-
-        requested_orders = [item.stop_order for item in data.stops]
-        if len(requested_orders) != len(set(requested_orders)):
-            raise ValidationError("Duplicate stop orders specified in reorder request")
-
-        order_map = {item.route_stop_id: item.stop_order for item in data.stops}
-        return self.route_stop_repo.batch_reorder(route_id, order_map)
+        self.pickup_point_repo.delete(point)

@@ -7,12 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.models.bus import Bus
 from app.models.enums import (
+    BoardingDirection,
     BusStatus,
     GenderEnum,
     PaymentMethod,
     PaymentStatus,
     ReservationStatus,
     RoleEnum,
+    TripDirection,
     TripStatus,
 )
 from app.models.payment import Payment
@@ -75,12 +77,7 @@ def _setup_entities(
     session.commit()
 
     route = Route(
-        route_number=f"R-PAY-{uid}",
         name=f"Route Pay {uid}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=15.0,
-        estimated_duration_minutes=30,
         is_active=True,
     )
     bus = Bus(
@@ -111,23 +108,31 @@ def _setup_entities(
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now + timedelta(hours=3),
         estimated_arrival_time=now + timedelta(hours=4),
         passenger_capacity=30,
-        fare_amount=Decimal("45.00"),
         status=TripStatus.SCHEDULED,
     )
     session.add(trip)
     session.commit()
     session.refresh(trip)
 
+    from app.models.pickup_point import PickupPoint
+
+    point = PickupPoint(route_id=route.id, name="Pay Stop", sequence=1)
+    session.add(point)
+    session.commit()
+
     reservation = Reservation(
         trip_id=trip.id,
         student_id=student.id,
         subscription_id=_setup_subscription(session, student.id).id,
         service_date=trip.departure_time.date() + timedelta(days=0),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     session.add(reservation)

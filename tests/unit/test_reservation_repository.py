@@ -1,149 +1,42 @@
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
-import hashlib
-import secrets
-import uuid
+from datetime import date, timedelta
 
-import pytest
 from sqlalchemy.orm import Session
 
-from app.models.bus import Bus
-from app.models.enums import (
-    BusStatus,
-    GenderEnum,
-    ReservationStatus,
-    RoleEnum,
-    SubscriptionPlanType,
-    SubscriptionStatus,
-    TripStatus,
+from tests.helpers import (
+    make_reservation,
+    make_student,
+    make_subscription,
+    make_trip,
 )
-from app.models.reservation import Reservation
-from app.models.route import Route
-from app.models.station import Station
-from app.models.subscription import Subscription
-from app.models.subscription_plan import SubscriptionPlan
-from app.models.trip import Trip
-from app.models.user import User
+
+from app.models.enums import BoardingDirection, ReservationStatus
 from app.repositories.reservation_repository import ReservationRepository
 
 
-def _setup_entities(session: Session) -> tuple[Trip, User, User, Subscription]:
-    uid = uuid.uuid4().hex[:8]
-    s1 = Station(
-        name=f"Origin St {uid}", code=f"OR-{uid}", latitude=30.0, longitude=31.0
-    )
-    s2 = Station(
-        name=f"Dest St {uid}", code=f"DE-{uid}", latitude=30.1, longitude=31.1
-    )
-    session.add_all([s1, s2])
-    session.commit()
-
-    route = Route(
-        route_number=f"R-{uid}",
-        name=f"Route Repo {uid}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=15.0,
-        estimated_duration_minutes=30,
-        is_active=True,
-    )
-    bus = Bus(
-        bus_number=f"BUS-{uid}",
-        license_plate=f"LP-{uid}",
-        capacity=40,
-        status=BusStatus.ACTIVE,
-    )
-    supervisor = User(
-        full_name=f"Supervisor Repo {uid}",
-        phone_number=f"+20101{int(uid, 16) % 10000000:07d}",
-        password_hash="hashed",
-        gender=GenderEnum.MALE,
-        role=RoleEnum.SUPERVISOR,
-        is_active=True,
-    )
-    student1 = User(
-        full_name=f"Student 1 {uid}",
-        phone_number=f"+20102{int(uid, 16) % 10000000:07d}",
-        password_hash="hashed",
-        gender=GenderEnum.MALE,
-        role=RoleEnum.STUDENT,
-        is_active=True,
-    )
-    student2 = User(
-        full_name=f"Student 2 {uid}",
-        phone_number=f"+20103{int(uid, 16) % 10000000:07d}",
-        password_hash="hashed",
-        gender=GenderEnum.FEMALE,
-        role=RoleEnum.STUDENT,
-        is_active=True,
-    )
-    session.add_all([route, bus, supervisor, student1, student2])
-    session.commit()
-
-    plan = SubscriptionPlan(
-        name=f"Plan {uid}",
-        plan_type=SubscriptionPlanType.MONTHLY,
-        duration_days=30,
-        days_per_week=4,
-        price=Decimal("500.00"),
-        is_active=True,
-    )
-    session.add(plan)
-    session.commit()
-
-    raw = secrets.token_urlsafe(16)
-    subscription = Subscription(
-        student_id=student1.id,
-        plan_id=plan.id,
-        price_snapshot=plan.price,
-        duration_days_snapshot=plan.duration_days,
-        days_per_week_snapshot=plan.days_per_week,
-        start_date=date.today() - timedelta(days=1),
-        end_date=date.today() + timedelta(days=29),
-        qr_token_hash=hashlib.sha256(raw.encode()).hexdigest(),
-        qr_token=raw,
-        status=SubscriptionStatus.ACTIVE,
-    )
-    session.add(subscription)
-    session.commit()
-    session.refresh(subscription)
-
-    now = datetime.now(timezone.utc)
-    trip = Trip(
-        route_id=route.id,
-        bus_id=bus.id,
-        supervisor_id=supervisor.id,
-        departure_time=now + timedelta(days=1),
-        estimated_arrival_time=now + timedelta(days=1, hours=1),
-        passenger_capacity=30,
-        status=TripStatus.SCHEDULED,
-    )
-    session.add(trip)
-    session.commit()
-    session.refresh(trip)
-
-    return trip, student1, student2, subscription
-
-
 def _service_date() -> date:
-    """Reservations in these tests use a service date distinct per test call."""
     return date.today() + timedelta(days=1)
 
 
 def test_create_and_get_by_id(db_session: Session) -> None:
-    trip, student1, _, subscription = _setup_entities(db_session)
+    trip = make_trip(db_session)
+    student = make_student(db_session)
+    subscription = make_subscription(db_session, student)
     repo = ReservationRepository(db_session)
 
     res = repo.create(
         trip_id=trip.id,
-        student_id=student1.id,
+        student_id=student.id,
         subscription_id=subscription.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
     assert res.id is not None
     assert res.trip_id == trip.id
-    assert res.student_id == student1.id
+    assert res.student_id == student.id
     assert res.subscription_id == subscription.id
+    assert res.direction == BoardingDirection.OUTBOUND
+    assert res.selected_pickup_point_id == trip.trip_stops[0].pickup_point_id
     assert res.service_date == _service_date()
     assert res.status == ReservationStatus.CONFIRMED
     assert res.booked_at is not None
@@ -151,38 +44,63 @@ def test_create_and_get_by_id(db_session: Session) -> None:
 
     fetched = repo.get_by_id(res.id)
     assert fetched is not None
-    assert fetched.id == res.id
     assert fetched.trip.id == trip.id
-    assert fetched.student.id == student1.id
+    assert fetched.student.id == student.id
     assert fetched.subscription.id == subscription.id
+    assert fetched.selected_pickup_point.id == trip.trip_stops[0].pickup_point_id
 
 
-def test_get_active_for_student_and_trip(db_session: Session) -> None:
-    trip, student1, student2, subscription = _setup_entities(db_session)
+def test_get_active_for_student_date_direction(db_session: Session) -> None:
+    trip = make_trip(db_session)
+    student = make_student(db_session)
+    subscription = make_subscription(db_session, student)
     repo = ReservationRepository(db_session)
+    service_date = _service_date()
 
-    assert repo.get_active_for_student_and_trip(trip.id, student1.id) is None
-
-    res1 = repo.create(
-        trip_id=trip.id,
-        student_id=student1.id,
-        subscription_id=subscription.id,
-        service_date=_service_date(),
+    assert (
+        repo.get_active_for_student_date_direction(
+            student.id, service_date, BoardingDirection.OUTBOUND
+        )
+        is None
     )
-    active = repo.get_active_for_student_and_trip(trip.id, student1.id)
-    assert active is not None
-    assert active.id == res1.id
 
-    # student2 still has no active reservation
-    assert repo.get_active_for_student_and_trip(trip.id, student2.id) is None
+    res = repo.create(
+        trip_id=trip.id,
+        student_id=student.id,
+        subscription_id=subscription.id,
+        service_date=service_date,
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
+    )
+    found = repo.get_active_for_student_date_direction(
+        student.id, service_date, BoardingDirection.OUTBOUND
+    )
+    assert found is not None
+    assert found.id == res.id
 
-    # Cancel reservation
-    repo.cancel(res1)
-    assert repo.get_active_for_student_and_trip(trip.id, student1.id) is None
+    # Other direction is still free (one outbound + one return per date).
+    assert (
+        repo.get_active_for_student_date_direction(
+            student.id, service_date, BoardingDirection.RETURN
+        )
+        is None
+    )
+
+    repo.cancel(res)
+    assert (
+        repo.get_active_for_student_date_direction(
+            student.id, service_date, BoardingDirection.OUTBOUND
+        )
+        is None
+    )
 
 
 def test_count_confirmed_for_trip(db_session: Session) -> None:
-    trip, student1, student2, subscription = _setup_entities(db_session)
+    trip = make_trip(db_session, capacity=30)
+    student1 = make_student(db_session)
+    student2 = make_student(db_session)
+    sub1 = make_subscription(db_session, student1)
+    sub2 = make_subscription(db_session, student2)
     repo = ReservationRepository(db_session)
 
     assert repo.count_confirmed_for_trip(trip.id) == 0
@@ -190,16 +108,20 @@ def test_count_confirmed_for_trip(db_session: Session) -> None:
     res1 = repo.create(
         trip_id=trip.id,
         student_id=student1.id,
-        subscription_id=subscription.id,
+        subscription_id=sub1.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
     assert repo.count_confirmed_for_trip(trip.id) == 1
 
-    res2 = repo.create(
+    repo.create(
         trip_id=trip.id,
         student_id=student2.id,
-        subscription_id=subscription.id,
+        subscription_id=sub2.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
     assert repo.count_confirmed_for_trip(trip.id) == 2
 
@@ -208,36 +130,46 @@ def test_count_confirmed_for_trip(db_session: Session) -> None:
 
 
 def test_list_for_student(db_session: Session) -> None:
-    trip, student1, student2, subscription = _setup_entities(db_session)
+    trip = make_trip(db_session)
+    student1 = make_student(db_session)
+    student2 = make_student(db_session)
+    sub1 = make_subscription(db_session, student1)
+    sub2 = make_subscription(db_session, student2)
     repo = ReservationRepository(db_session)
 
     res1 = repo.create(
         trip_id=trip.id,
         student_id=student1.id,
-        subscription_id=subscription.id,
+        subscription_id=sub1.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
-    res2 = repo.create(
+    repo.create(
         trip_id=trip.id,
         student_id=student2.id,
-        subscription_id=subscription.id,
+        subscription_id=sub2.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
 
-    # Student 1 list
     items, total = repo.list_for_student(student_id=student1.id)
     assert total == 1
-    assert len(items) == 1
     assert items[0].id == res1.id
 
-    # Filter by status
-    repo.cancel(res1)
-    items_conf, total_conf = repo.list_for_student(
-        student_id=student1.id, status=ReservationStatus.CONFIRMED
+    # Filter by direction
+    _, total_out = repo.list_for_student(
+        student_id=student1.id, direction=BoardingDirection.OUTBOUND
     )
-    assert total_conf == 0
-    assert len(items_conf) == 0
+    assert total_out == 1
+    _, total_ret = repo.list_for_student(
+        student_id=student1.id, direction=BoardingDirection.RETURN
+    )
+    assert total_ret == 0
 
+    # Filter by status after cancel
+    repo.cancel(res1)
     items_canc, total_canc = repo.list_for_student(
         student_id=student1.id, status=ReservationStatus.CANCELLED
     )
@@ -246,45 +178,55 @@ def test_list_for_student(db_session: Session) -> None:
 
 
 def test_list_all_admin(db_session: Session) -> None:
-    trip, student1, student2, subscription = _setup_entities(db_session)
+    trip = make_trip(db_session)
+    student1 = make_student(db_session)
+    student2 = make_student(db_session)
+    sub1 = make_subscription(db_session, student1)
+    sub2 = make_subscription(db_session, student2)
     repo = ReservationRepository(db_session)
 
     res1 = repo.create(
         trip_id=trip.id,
         student_id=student1.id,
-        subscription_id=subscription.id,
+        subscription_id=sub1.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
-    res2 = repo.create(
+    repo.create(
         trip_id=trip.id,
         student_id=student2.id,
-        subscription_id=subscription.id,
+        subscription_id=sub2.id,
         service_date=_service_date(),
+        direction=BoardingDirection.RETURN,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
 
     items, total = repo.list_all()
     assert total == 2
     assert len(items) == 2
 
-    # Filter by student_id
     items_s1, total_s1 = repo.list_all(student_id=student1.id)
     assert total_s1 == 1
     assert items_s1[0].id == res1.id
 
-    # Filter by trip_id
     items_t, total_t = repo.list_all(trip_id=trip.id)
     assert total_t == 2
 
 
 def test_cancel_sets_timestamp_and_status(db_session: Session) -> None:
-    trip, student1, _, subscription = _setup_entities(db_session)
+    trip = make_trip(db_session)
+    student = make_student(db_session)
+    subscription = make_subscription(db_session, student)
     repo = ReservationRepository(db_session)
 
     res = repo.create(
         trip_id=trip.id,
-        student_id=student1.id,
+        student_id=student.id,
         subscription_id=subscription.id,
         service_date=_service_date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
     assert res.status == ReservationStatus.CONFIRMED
     assert res.cancelled_at is None
@@ -294,22 +236,34 @@ def test_cancel_sets_timestamp_and_status(db_session: Session) -> None:
     assert cancelled.cancelled_at is not None
 
 
-def test_get_active_for_student_and_date(db_session: Session) -> None:
-    trip, student1, _, subscription = _setup_entities(db_session)
+def test_trip_history_filter_by_completed_trip(db_session: Session) -> None:
+    """list_for_student(trip_status=COMPLETED) scopes history to completed trips."""
+    from app.models.enums import TripStatus
+
+    trip = make_trip(db_session)
+    student = make_student(db_session)
+    subscription = make_subscription(db_session, student)
     repo = ReservationRepository(db_session)
 
-    service_date = _service_date()
-    assert repo.get_active_for_student_and_date(student1.id, service_date) is None
-
-    res = repo.create(
+    repo.create(
         trip_id=trip.id,
-        student_id=student1.id,
+        student_id=student.id,
         subscription_id=subscription.id,
-        service_date=service_date,
+        service_date=trip.departure_time.date(),
+        direction=BoardingDirection.OUTBOUND,
+        selected_pickup_point_id=trip.trip_stops[0].pickup_point_id,
     )
-    found = repo.get_active_for_student_and_date(student1.id, service_date)
-    assert found is not None
-    assert found.id == res.id
 
-    repo.cancel(res)
-    assert repo.get_active_for_student_and_date(student1.id, service_date) is None
+    # Trip is SCHEDULED: history is empty.
+    _, total_scheduled = repo.list_for_student(
+        student_id=student.id, trip_status=TripStatus.COMPLETED
+    )
+    assert total_scheduled == 0
+
+    # Complete the trip: it appears in the student's history.
+    trip.status = TripStatus.COMPLETED
+    db_session.commit()
+    _, total_completed = repo.list_for_student(
+        student_id=student.id, trip_status=TripStatus.COMPLETED
+    )
+    assert total_completed == 1

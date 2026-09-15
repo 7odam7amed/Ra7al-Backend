@@ -2,20 +2,18 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
-    CheckConstraint,
     Date,
     DateTime,
     Enum,
     ForeignKey,
     Index,
-    String,
     func,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
-from app.models.enums import ReservationStatus
+from app.models.enums import BoardingDirection, ReservationStatus
 
 if TYPE_CHECKING:
     from app.models.pickup_point import PickupPoint
@@ -25,36 +23,27 @@ if TYPE_CHECKING:
 
 
 class Reservation(BaseModel):
-    """Reservation model representing a student's DAILY transportation selection.
+    """One directed booking: a student, ONE trip (single direction), one
+    selected pickup point, for ONE service date.
 
-    A reservation pins one calendar service date to a concrete trip plus the
-    student's outbound and return pickup points for that date. It requires an
-    ACTIVE subscription owned by the student, but is otherwise independent of
-    the subscription lifecycle: the subscription answers "which plan did the
-    student buy?", the reservation answers "how does the student travel on a
-    given day?".
+    Business rules enforced by schema and service:
+      - ONE OUTBOUND reservation and ONE RETURN reservation per student per
+        service date (partial unique indexes below; direction derived from
+        the booked trip).
+      - The selected point must be one of the booked trip's stops (service
+        layer validation; a point is always owned by the trip's route).
+      - Requires an ACTIVE subscription covering the service date.
     """
 
     __tablename__ = "reservations"
     __table_args__ = (
-        CheckConstraint(
-            "direction_mode IN ('BOTH', 'OUTBOUND_ONLY', 'RETURN_ONLY')",
-            name="chk_reservation_direction_mode",
-        ),
-        # One active daily selection per student per service date.
+        # One outbound + one return per student per service date. The index
+        # direction (direction DESC) keeps the two directions distinct.
         Index(
-            "uq_active_student_service_date_reservation",
+            "uq_student_date_direction_reservation",
             "student_id",
             "service_date",
-            unique=True,
-            postgresql_where=text("status = 'CONFIRMED'"),
-            sqlite_where=text("status = 'CONFIRMED'"),
-        ),
-        # One active selection per student per trip per day (duplicate-trip guard).
-        Index(
-            "uq_active_trip_student_reservation",
-            "trip_id",
-            "student_id",
+            "direction",
             unique=True,
             postgresql_where=text("status = 'CONFIRMED'"),
             sqlite_where=text("status = 'CONFIRMED'"),
@@ -67,31 +56,31 @@ class Reservation(BaseModel):
     student_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
     )
-    # The subscription that authorizes this daily selection.
+    # The subscription that authorizes this booking.
     subscription_id: Mapped[int] = mapped_column(
         ForeignKey("subscriptions.id", ondelete="RESTRICT"),
         index=True,
         nullable=False,
     )
-    # The calendar transportation date this selection is for (normally tomorrow).
+    # The calendar transportation date this booking is for.
     service_date: Mapped[date] = mapped_column(
         Date, index=True, nullable=False
     )
-    # Selected gathering points for the day. Both belong to the trip's route;
-    # either may be omitted if the student travels one way only.
-    outbound_pickup_point_id: Mapped[int | None] = mapped_column(
-        ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=True,
+    # Direction of the booked trip (denormalized from Trip.direction for
+    # queryable one-outbound/one-return enforcement).
+    direction: Mapped[BoardingDirection] = mapped_column(
+        Enum(
+            BoardingDirection,
+            name="boarding_direction_enum",
+            native_enum=False,
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
+        nullable=False,
     )
-    return_pickup_point_id: Mapped[int | None] = mapped_column(
+    # The ONE stop the student selected on this trip: their pickup point on
+    # an OUTBOUND trip, or their drop-off point on a RETURN trip.
+    selected_pickup_point_id: Mapped[int] = mapped_column(
         ForeignKey("pickup_points.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    # Which journeys the student needs this day.
-    direction_mode: Mapped[str] = mapped_column(
-        String(20),
-        default="BOTH",
-        server_default="BOTH",
         nullable=False,
     )
     status: Mapped[ReservationStatus] = mapped_column(
@@ -123,16 +112,13 @@ class Reservation(BaseModel):
     subscription: Mapped["Subscription"] = relationship(
         "Subscription", foreign_keys=[subscription_id]
     )
-    outbound_pickup_point: Mapped["PickupPoint | None"] = relationship(
-        "PickupPoint", foreign_keys=[outbound_pickup_point_id]
-    )
-    return_pickup_point: Mapped["PickupPoint | None"] = relationship(
-        "PickupPoint", foreign_keys=[return_pickup_point_id]
+    selected_pickup_point: Mapped["PickupPoint"] = relationship(
+        "PickupPoint", foreign_keys=[selected_pickup_point_id]
     )
 
     def __repr__(self) -> str:
         return (
             f"<Reservation id={self.id} trip_id={self.trip_id} "
             f"student_id={self.student_id} service_date={self.service_date} "
-            f"status={self.status}>"
+            f"direction={self.direction} status={self.status}>"
         )

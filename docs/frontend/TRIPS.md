@@ -1,131 +1,81 @@
-# Trips & Pickup (Gathering) Points
+# Trips & Trip Stops (Post-Refactor)
 
-Verified against `app/api/v1/trips.py`, `app/services/trip_service.py`, and `app/services/pickup_point_service.py`.
+Verified against `app/api/v1/trips.py` and `app/services/trip_service.py`.
 
 ---
 
-## 1. Trip Model
+## 1. Trip model
 
-A trip is one scheduled execution of a route with a specific bus and supervisor.
-
-`TripResponse`:
+Every trip has exactly **one direction**: `OUTBOUND` (ذهاب) or `RETURN` (عودة). There is **no fare/ticket price** on trips.
 
 ```json
 {
-  "id": 55,
+  "id": 123,
   "route_id": 10,
+  "direction": "OUTBOUND",
   "bus_id": 3,
   "supervisor_id": 7,
-  "departure_time": "2026-09-15T07:30:00Z",
-  "estimated_arrival_time": "2026-09-15T08:05:00Z",
+  "departure_time": "2026-09-20T06:30:00Z",
+  "estimated_arrival_time": "2026-09-20T07:00:00Z",
   "status": "SCHEDULED",
-  "passenger_capacity": 45,
-  "fare_amount": "50.00",
-  "created_at": "...",
-  "updated_at": "...",
-  "route": { "…": "RouteResponse" },
-  "bus": { "…": "BusResponse" },
-  "supervisor": { "…": "UserResponse" },
-  "pickup_points": [ { "…": "PickupPointResponse" } ]
+  "passenger_capacity": 40,
+  "allow_overbooking": false,
+  "trip_stops": [
+    { "id": 1, "trip_id": 123, "pickup_point_id": 5, "stop_order": 1, "departure_time": "2026-09-20T06:30:00Z", "point_name": "Al-Mahatta" },
+    { "id": 2, "trip_id": 123, "pickup_point_id": 7, "stop_order": 2, "departure_time": "2026-09-20T07:00:00Z", "point_name": "Assiut El-Gadida" }
+  ]
 }
 ```
 
-| Field | Notes |
+Key rules:
+
+| Field | Rule |
 |---|---|
-| `route_id` / `route` | The route being executed. |
-| `bus_id` / `bus` | Vehicle; must be `ACTIVE` at creation. |
-| `supervisor_id` / `supervisor` | Required; must be an active SUPERVISOR. This assignment is what authorizes the supervisor to scan QR codes for the trip. |
-| `departure_time` / `estimated_arrival_time` | Timezone-aware datetimes; arrival strictly after departure. |
-| `status` | `TripStatus` — see lifecycle below. |
-| `passenger_capacity` | Optional override at creation; defaults to the bus capacity. 1–150. Reservation capacity is checked against this value. |
-| `fare_amount` | EGP, default `50.00`, > 0. Used as the amount for reservation payments. |
+| `direction` | `OUTBOUND` or `RETURN`, explicit at creation, immutable. |
+| `departure_time` | **Derived**: equals the FIRST stop's `departure_time`. |
+| `estimated_arrival_time` | **Derived**: equals the LAST stop's `departure_time`. |
+| `trip_stops[].stop_order` | Explicit, unique per trip, > 0. |
+| `trip_stops[].departure_time` | Required per stop on create/update. |
+| `allow_overbooking` | Optional per-trip flag (default `false`). |
+| `fare_amount` | **Removed.** Transportation is subscription-covered. |
 
-> The API models **single scheduled departures**, not recurring schedules or separate "going/return trip types". An outbound journey and a return journey are simply two trips. The outbound/return distinction exists at **boarding** level (`BoardingDirection` on the scan) — see [QR_AND_BOARDING.md](QR_AND_BOARDING.md).
+## 2. CEO trip creation
 
-## 2. Status Lifecycle
-
-```
-SCHEDULED ──→ IN_PROGRESS ──→ COMPLETED
-    │              │
-    └──────────────┴──→ CANCELLED
-```
-
-- Transitions via `PATCH /trips/{trip_id}/status` (CEO). Invalid transitions → `422`.
-- `COMPLETED` and `CANCELLED` are terminal.
-- Only `SCHEDULED` trips accept reservations; `SCHEDULED` and `IN_PROGRESS` accept boarding scans.
-- Setting the same status again is a no-op success.
-
-## 3. Endpoints & Roles
-
-| Endpoint | Roles |
-|---|---|
-| `POST /trips` | CEO |
-| `GET /trips` | CEO, SUPERVISOR |
-| `GET /trips/{trip_id}` | CEO, SUPERVISOR |
-| `PATCH /trips/{trip_id}` | CEO |
-| `PATCH /trips/{trip_id}/status` | CEO |
-| `DELETE /trips/{trip_id}` | CEO |
-| `POST /trips/{trip_id}/pickup-points` | CEO |
-| `GET /trips/{trip_id}/pickup-points` | CEO, SUPERVISOR |
-| `PATCH /trips/{trip_id}/pickup-points/{point_id}` | CEO |
-| `DELETE /trips/{trip_id}/pickup-points/{point_id}` | CEO |
-
-**Students have no trip endpoints.** To browse bookable trips, students use `GET /reservations/available-trips` ([RESERVATIONS.md](RESERVATIONS.md)).
-
-## 4. Create / Update Rules
-
-`POST /trips` (CEO) — required: `route_id`, `bus_id`, `supervisor_id`, `departure_time`, `estimated_arrival_time`; optional: `passenger_capacity`, `fare_amount`, `pickup_points[]` (created inline).
-
-Server validations at create/update:
-
-| Check | Failure |
-|---|---|
-| Route exists and is active | `404` / `422` |
-| Bus exists and is `ACTIVE` | `404` / `422` |
-| Supervisor exists, is SUPERVISOR, is active | `404` / `422` |
-| Arrival strictly after departure | `422` |
-| **Bus schedule conflict** — the bus must not overlap another trip's window | `409` |
-| **Supervisor schedule conflict** — the supervisor must not overlap another trip's window | `409` |
-
-`PATCH /trips/{trip_id}` re-validates only changed references and re-checks conflicts excluding the trip itself.
-
-## 5. Trip Listing Filters (CEO/SUPERVISOR)
-
-`page`, `page_size`, `status`, `route_id`, `bus_id`, `supervisor_id`, `departure_after`, `departure_before` (ISO 8601 datetimes).
-
-## 6. Pickup (Gathering) Points
-
-Per-trip gathering locations where students board and supervisors scan.
-
-`PickupPointResponse`:
+`POST /api/v1/trips` (CEO only):
 
 ```json
 {
-  "id": 9,
-  "trip_id": 55,
-  "name": "Cairo University Gate 3",
-  "address": "Giza, University St.",
-  "sequence": 1,
-  "created_at": "...",
-  "updated_at": "..."
+  "route_id": 10,
+  "direction": "OUTBOUND",
+  "bus_id": 3,
+  "supervisor_id": 7,
+  "passenger_capacity": 40,
+  "allow_overbooking": false,
+  "stops": [
+    { "pickup_point_id": 5, "stop_order": 1, "departure_time": "2026-09-20T06:30:00Z" },
+    { "pickup_point_id": 7, "stop_order": 2, "departure_time": "2026-09-20T07:00:00Z" }
+  ]
 }
 ```
 
-- `name` 1–255 chars (required), `address` ≤ 255 optional, `sequence` ≥ 1 (ordering; not enforced unique server-side).
-- Students select their outbound (and optionally return) pickup point **from a trip's pickup points** when subscribing; the scan endpoint validates that the scanned pickup point matches the student's configured one and belongs to the scanned trip ([QR_AND_BOARDING.md](QR_AND_BOARDING.md)).
-- **How students see a trip's points:** `GET /reservations/available-trips` embeds each available trip's `pickup_points` (student-accessible). The `GET /trips/{trip_id}/pickup-points` endpoint below remains a CEO/SUPERVISOR management view — students never need it.
-- Points can also be provided inline in `POST /trips` via the `pickup_points` array.
+Validation (`422`):
 
-## 7. Frontend Flow Suggestion (CEO scheduler)
+- Every `pickup_point_id` MUST belong to the trip's route (`"… does not belong to route …"`).
+- No duplicate points, no duplicate `stop_order`.
+- Direction is required.
+- Bus/supervisor must be active and eligible; bus/supervisor time-overlap conflicts return `409`.
 
-```
-Pick active route   ← GET /routes?is_active=true
-Pick active bus     ← GET /buses?status=ACTIVE
-Pick supervisor     ← GET /users?role=SUPERVISOR&is_active=true (CEO)
-   ↓
-POST /trips (departure/arrival/capacity/fare, optional pickup_points)
-   ↓ 409? → adjust time/bus/supervisor (schedule conflict)
-PATCH /trips/{id}/pickup-points... (fine-tune gathering points)
-   ↓
-PATCH /trips/{id}/status (SCHEDULED → IN_PROGRESS on departure day → COMPLETED)
-```
+## 3. Trip lifecycle & history
+
+- `SCHEDULED → COMPLETED` when the scheduled end passes; completed trips leave the upcoming list but are never deleted.
+- History endpoints (see RESERVATIONS.md):
+  - CEO: all completed trips.
+  - Supervisor: only trips assigned to them.
+  - Student: only completed trips they booked.
+
+## 4. Destination semantics (critical)
+
+- **OUTBOUND**: the physical stop sequence ends at the last configured stop, but the destination shown to each student is **the student's registered university** (`current_student.university`). Two students on the same outbound trip can see different destinations.
+- **RETURN**: the student's shown destination is **their selected drop-off point**; the last configured stop remains the physical end of the trip.
+
+Never model destination as a Route or Trip field.

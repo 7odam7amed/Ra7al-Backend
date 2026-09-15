@@ -1,10 +1,17 @@
+"""Integration tests for the payments API under the subscription-payment model.
+
+Payments are created automatically with each subscription request (plan
+purchase). Reservation payments are retired: trips no longer carry a fare, so
+POST /payments must reject reservation-payment attempts. Verification still
+activates the associated PENDING subscription.
+"""
+
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import secrets
-import uuid
+
 from fastapi.testclient import TestClient
-import pytest
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
@@ -14,20 +21,24 @@ from app.models.enums import (
     GenderEnum,
     PaymentMethod,
     PaymentStatus,
-    ReservationStatus,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
-    TripStatus,
 )
 from app.models.payment import Payment
-from app.models.reservation import Reservation
 from app.models.route import Route
-from app.models.station import Station
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
+from app.models.pickup_point import PickupPoint
 from app.models.user import User
+
+BASE = "/api/v1"
+
+PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4"
+)
 
 
 def _create_user_and_token(
@@ -53,86 +64,74 @@ def _create_user_and_token(
     return user, token
 
 
-def _setup_api_prerequisites(
-    session: Session,
-    fare_amount: Decimal = Decimal("55.00"),
-    departure_time: datetime | None = None,
-    trip_status: TripStatus = TripStatus.SCHEDULED,
-) -> tuple[Route, Bus, User, Trip, Reservation, User, str]:
-    uid = uuid.uuid4().hex[:8]
-    s1 = Station(
-        name=f"Origin Pay API {uid}",
-        code=f"POR-API-{uid}",
-        latitude=30.0,
-        longitude=31.0,
-    )
-    s2 = Station(
-        name=f"Dest Pay API {uid}",
-        code=f"PDE-API-{uid}",
-        latitude=30.1,
-        longitude=31.1,
-    )
-    session.add_all([s1, s2])
-    session.commit()
-
-    route = Route(
-        route_number=f"R-PAPI-{uid}",
-        name=f"Route Pay API {uid}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=20.0,
-        estimated_duration_minutes=40,
-        is_active=True,
-    )
+def _setup_transit(session: Session) -> tuple[Route, Trip]:
+    uid = secrets.token_hex(4)
+    route = Route(name=f"Route Pay {uid}", is_active=True)
     bus = Bus(
-        bus_number=f"BUS-PAPI-{uid}",
-        license_plate=f"LP-PAPI-{uid}",
+        bus_number=f"BUS-PAY-{uid}",
+        license_plate=f"LP-PAY-{uid}",
         capacity=40,
         status=BusStatus.ACTIVE,
     )
     supervisor = User(
-        full_name=f"Supervisor Pay API {uid}",
-        phone_number=f"+2010{abs(hash(uid + 'sup')) % 100000000:08d}",
+        full_name=f"Supervisor Pay {uid}",
+        phone_number=f"+2010{int(uid, 16) % 100000000:08d}",
         password_hash=hash_password("Password123!"),
         gender=GenderEnum.MALE,
         role=RoleEnum.SUPERVISOR,
         is_active=True,
     )
-    student, student_token = _create_user_and_token(
-        session, f"student_papi_{uid}", RoleEnum.STUDENT
-    )
     session.add_all([route, bus, supervisor])
-    session.commit()
+    session.flush()
 
-    if departure_time is None:
-        departure_time = datetime.now(timezone.utc) + timedelta(hours=3)
-
+    departure = datetime.now(timezone.utc) + timedelta(hours=3)
     trip = Trip(
         route_id=route.id,
+        direction="OUTBOUND",
         bus_id=bus.id,
         supervisor_id=supervisor.id,
-        departure_time=departure_time,
-        estimated_arrival_time=departure_time + timedelta(hours=1),
+        departure_time=departure,
+        estimated_arrival_time=departure + timedelta(hours=1),
         passenger_capacity=30,
-        fare_amount=fare_amount,
-        status=trip_status,
+        status="SCHEDULED",
     )
     session.add(trip)
+    session.flush()
+    point = PickupPoint(route_id=route.id, name=f"Point {uid}", sequence=1)
+    session.add(point)
+    session.flush()
+    session.add(
+        TripStop(
+            trip_id=trip.id,
+            pickup_point_id=point.id,
+            stop_order=1,
+            departure_time=departure,
+        )
+    )
     session.commit()
     session.refresh(trip)
+    return route, trip
 
-    # A reservation requires an active subscription (daily-selection model).
+
+def _create_plan(session: Session, price: Decimal = Decimal("500.00")) -> SubscriptionPlan:
     plan = SubscriptionPlan(
-        name=f"Plan PAPI {uid}",
+        name=f"Plan {secrets.token_hex(4)}",
         plan_type=SubscriptionPlanType.MONTHLY,
         duration_days=30,
         days_per_week=4,
-        price=Decimal("500.00"),
+        price=price,
         is_active=True,
     )
     session.add(plan)
-    session.flush()
+    session.commit()
+    session.refresh(plan)
+    return plan
 
+
+def _make_raw_qr_subscription(
+    session: Session, student: User, plan: SubscriptionPlan
+) -> Subscription:
+    """Seed an ACTIVE subscription with a known raw QR token (for /my listings)."""
     raw = secrets.token_urlsafe(16)
     subscription = Subscription(
         student_id=student.id,
@@ -149,312 +148,247 @@ def _setup_api_prerequisites(
     session.add(subscription)
     session.commit()
     session.refresh(subscription)
-
-    reservation = Reservation(
-        trip_id=trip.id,
-        student_id=student.id,
-        subscription_id=subscription.id,
-        service_date=trip.departure_time.date(),
-        status=ReservationStatus.CONFIRMED,
-    )
-    session.add(reservation)
-    session.commit()
-    session.refresh(reservation)
-
-    return route, bus, supervisor, trip, reservation, student, student_token
+    return subscription
 
 
 def test_unauthenticated_requests_rejected(client_with_db: TestClient) -> None:
     assert (
         client_with_db.post(
-            "/api/v1/payments", json={"reservation_id": 1, "method": "CASH"}
+            f"{BASE}/payments", json={"reservation_id": 1, "method": "CASH"}
         ).status_code
         == 401
     )
-    assert client_with_db.get("/api/v1/payments/my").status_code == 401
-    assert client_with_db.get("/api/v1/payments").status_code == 401
-    assert client_with_db.get("/api/v1/payments/1").status_code == 401
-    assert client_with_db.patch("/api/v1/payments/1/submit").status_code == 401
-    assert client_with_db.patch("/api/v1/payments/1/cancel").status_code == 401
-    assert client_with_db.patch("/api/v1/payments/1/verify").status_code == 401
-    assert client_with_db.patch("/api/v1/payments/1/reject").status_code == 401
+    assert client_with_db.get(f"{BASE}/payments/my").status_code == 401
+    assert client_with_db.get(f"{BASE}/payments").status_code == 401
+    assert client_with_db.get(f"{BASE}/payments/1").status_code == 401
+    assert client_with_db.patch(f"{BASE}/payments/1/submit").status_code == 401
+    assert client_with_db.patch(f"{BASE}/payments/1/cancel").status_code == 401
+    assert client_with_db.patch(f"{BASE}/payments/1/verify").status_code == 401
+    assert client_with_db.patch(f"{BASE}/payments/1/reject").status_code == 401
 
 
-def test_rbac_access_control(
+def test_reservation_payments_are_retired(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, _, _, _, reservation, _, std_token = _setup_api_prerequisites(db_session)
-    _, sup_token = _create_user_and_token(
-        db_session, "sup_pay_rbac@test.edu", RoleEnum.SUPERVISOR
-    )
-    _, ceo_token = _create_user_and_token(
-        db_session, "ceo_pay_rbac@test.edu", RoleEnum.CEO
+    """Trips carry no fare: creating a payment against a reservation is rejected."""
+    _setup_transit(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_res_pay", RoleEnum.STUDENT
     )
 
-    # 1. POST /payments -> STUDENT ONLY (Supervisor & CEO rejected with 403)
-    payload = {
-        "reservation_id": reservation.id,
-        "method": "VODAFONE_CASH",
-        "transaction_reference": "VC-1234",
-    }
-    assert (
-        client_with_db.post(
-            "/api/v1/payments",
-            json=payload,
-            headers={"Authorization": f"Bearer {sup_token}"},
-        ).status_code
-        == 403
-    )
-    assert (
-        client_with_db.post(
-            "/api/v1/payments",
-            json=payload,
-            headers={"Authorization": f"Bearer {ceo_token}"},
-        ).status_code
-        == 403
-    )
-
-    res_std = client_with_db.post(
-        "/api/v1/payments",
-        json=payload,
+    res_create = client_with_db.post(
+        f"{BASE}/payments",
+        json={"reservation_id": 1, "method": "CASH"},
         headers={"Authorization": f"Bearer {std_token}"},
     )
-    assert res_std.status_code == 201
-    payment_id = res_std.json()["id"]
-
-    # 2. GET /payments/my -> STUDENT ONLY
-    assert (
-        client_with_db.get(
-            "/api/v1/payments/my",
-            headers={"Authorization": f"Bearer {sup_token}"},
-        ).status_code
-        == 403
-    )
-    assert (
-        client_with_db.get(
-            "/api/v1/payments/my",
-            headers={"Authorization": f"Bearer {std_token}"},
-        ).status_code
-        == 200
-    )
-
-    # 3. GET /payments -> CEO OR SUPERVISOR ONLY
-    assert (
-        client_with_db.get(
-            "/api/v1/payments",
-            headers={"Authorization": f"Bearer {std_token}"},
-        ).status_code
-        == 403
-    )
-    assert (
-        client_with_db.get(
-            "/api/v1/payments",
-            headers={"Authorization": f"Bearer {sup_token}"},
-        ).status_code
-        == 200
-    )
-
-    # 4. PATCH /payments/{id}/verify -> CEO OR SUPERVISOR ONLY
-    assert (
-        client_with_db.patch(
-            f"/api/v1/payments/{payment_id}/verify",
-            headers={"Authorization": f"Bearer {std_token}"},
-        ).status_code
-        == 403
-    )
-    assert (
-        client_with_db.patch(
-            f"/api/v1/payments/{payment_id}/verify",
-            headers={"Authorization": f"Bearer {sup_token}"},
-        ).status_code
-        == 200
-    )
+    assert res_create.status_code == 422
+    assert "subscription" in res_create.json()["detail"].lower()
 
 
-def test_vodafone_cash_flow(
+def test_digital_subscription_payment_requires_reference(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, _, _, _, reservation, _, std_token = _setup_api_prerequisites(
-        db_session, fare_amount=Decimal("55.00")
+    """Digital methods require a transaction reference; cash must not."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_digital_ref", RoleEnum.STUDENT
     )
-    _, sup_token = _create_user_and_token(
-        db_session, "sup_vc_flow@test.edu", RoleEnum.SUPERVISOR
-    )
+    headers = {"Authorization": f"Bearer {std_token}"}
 
-    # 1. Create payment as PENDING (without reference)
-    res_create = client_with_db.post(
-        "/api/v1/payments",
+    start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+
+    # Vodafone Cash without reference -> 422
+    res_no_ref = client_with_db.post(
+        f"{BASE}/subscriptions",
+        json={"plan_id": plan.id, "start_date": start_date, "payment_method": "VODAFONE_CASH"},
+        headers=headers,
+    )
+    assert res_no_ref.status_code == 422
+
+    # With reference -> 201 and a SUBMITTED payment auto-created
+    res_ok = client_with_db.post(
+        f"{BASE}/subscriptions",
         json={
-            "reservation_id": reservation.id,
-            "method": "VODAFONE_CASH",
+            "plan_id": plan.id,
+            "start_date": start_date,
+            "payment_method": "VODAFONE_CASH",
+            "transaction_reference": "VC-555666777",
+        },
+        headers=headers,
+    )
+    assert res_ok.status_code == 201, res_ok.text
+    data = res_ok.json()
+    assert data["payment_id"] is not None
+
+    # Digital payments remain PENDING until the receipt image is uploaded.
+    payment = db_session.get(Payment, data["payment_id"])
+    assert payment is not None
+    assert payment.status == PaymentStatus.PENDING
+    assert payment.transaction_reference == "VC-555666777"
+    assert float(payment.amount) == float(plan.price)
+    assert payment.subscription_id == data["id"]
+    assert payment.receipt_image_path is None
+
+
+def test_verification_activates_pending_subscription(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Verifying the subscription payment activates the PENDING subscription."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_verify_activate", RoleEnum.STUDENT
+    )
+    sup_headers = {"Authorization": f"Bearer {_create_user_and_token(db_session, 'sup_verify', RoleEnum.SUPERVISOR)[1]}"}
+
+    start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    res_sub = client_with_db.post(
+        f"{BASE}/subscriptions",
+        json={
+            "plan_id": plan.id,
+            "start_date": start_date,
+            "payment_method": "VODAFONE_CASH",
+            "transaction_reference": "VC-111222333",
         },
         headers={"Authorization": f"Bearer {std_token}"},
     )
-    assert res_create.status_code == 201
-    p_data = res_create.json()
-    assert p_data["status"] == "PENDING"
-    assert p_data["amount"] == "55.00"
-    payment_id = p_data["id"]
+    assert res_sub.status_code == 201
+    sub_id = res_sub.json()["id"]
+    pay_id = res_sub.json()["payment_id"]
+    assert res_sub.json()["status"] == "PENDING"
 
-    # 2. Submit payment with transaction reference
-    res_submit = client_with_db.patch(
-        f"/api/v1/payments/{payment_id}/submit",
-        json={"transaction_reference": "VC-555666777"},
+    # Digital payment without receipt: verification must be rejected until the
+    # student uploads the receipt image.
+    res_verify_no_receipt = client_with_db.patch(
+        f"{BASE}/payments/{pay_id}/verify", headers=sup_headers
+    )
+    assert res_verify_no_receipt.status_code == 422
+    assert "receipt" in res_verify_no_receipt.json()["detail"].lower()
+
+    # Upload the receipt -> payment becomes SUBMITTED with the stored path
+    res_upload = client_with_db.post(
+        f"{BASE}/payments/{pay_id}/receipt",
+        files={"image": ("receipt.png", PNG_BYTES, "image/png")},
         headers={"Authorization": f"Bearer {std_token}"},
     )
-    assert res_submit.status_code == 200
-    assert res_submit.json()["status"] == "SUBMITTED"
-    assert res_submit.json()["transaction_reference"] == "VC-555666777"
-    assert res_submit.json()["paid_at"] is not None
+    assert res_upload.status_code == 201, res_upload.text
+    assert res_upload.json()["status"] == "SUBMITTED"
+    assert res_upload.json()["receipt_image_path"]
 
-    # 3. Verify payment by supervisor
-    res_verify = client_with_db.patch(
-        f"/api/v1/payments/{payment_id}/verify",
-        headers={"Authorization": f"Bearer {sup_token}"},
-    )
+    res_verify = client_with_db.patch(f"{BASE}/payments/{pay_id}/verify", headers=sup_headers)
     assert res_verify.status_code == 200
     assert res_verify.json()["status"] == "VERIFIED"
     assert res_verify.json()["verified_at"] is not None
     assert res_verify.json()["verified_by"] is not None
 
-
-def test_cash_flow(client_with_db: TestClient, db_session: Session) -> None:
-    _, _, _, _, reservation, _, std_token = _setup_api_prerequisites(
-        db_session, fare_amount=Decimal("35.00")
-    )
-    _, sup_token = _create_user_and_token(
-        db_session, "sup_cash_flow@test.edu", RoleEnum.SUPERVISOR
-    )
-
-    # 1. Create cash payment
-    res_create = client_with_db.post(
-        "/api/v1/payments",
-        json={
-            "reservation_id": reservation.id,
-            "method": "CASH",
-            "notes": "Will pay at station",
-        },
-        headers={"Authorization": f"Bearer {std_token}"},
-    )
-    assert res_create.status_code == 201
-    p_id = res_create.json()["id"]
-    assert res_create.json()["status"] == "PENDING"
-    assert res_create.json()["amount"] == "35.00"
-
-    # 2. Supervisor directly verifies cash receipt
-    res_verify = client_with_db.patch(
-        f"/api/v1/payments/{p_id}/verify",
-        headers={"Authorization": f"Bearer {sup_token}"},
-    )
-    assert res_verify.status_code == 200
-    assert res_verify.json()["status"] == "VERIFIED"
+    sub = db_session.get(Subscription, sub_id)
+    assert sub is not None
+    assert sub.status == SubscriptionStatus.ACTIVE
 
 
-def test_rejection_and_reattempt_lifecycle(
+def test_rejection_keeps_subscription_pending(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, _, _, _, reservation, _, std_token = _setup_api_prerequisites(db_session)
-    _, sup_token = _create_user_and_token(
-        db_session, "sup_reject_flow@test.edu", RoleEnum.SUPERVISOR
+    """Rejecting a subscription payment keeps the subscription PENDING."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_reject_pay", RoleEnum.STUDENT
     )
+    sup_headers = {"Authorization": f"Bearer {_create_user_and_token(db_session, 'sup_reject_pay', RoleEnum.SUPERVISOR)[1]}"}
 
-    # 1. Create and submit payment
-    res1 = client_with_db.post(
-        "/api/v1/payments",
+    start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    res_sub = client_with_db.post(
+        f"{BASE}/subscriptions",
         json={
-            "reservation_id": reservation.id,
-            "method": "INSTAPAY",
+            "plan_id": plan.id,
+            "start_date": start_date,
+            "payment_method": "INSTAPAY",
             "transaction_reference": "IP-BAD-REF",
         },
         headers={"Authorization": f"Bearer {std_token}"},
     )
-    assert res1.status_code == 201
-    p1_id = res1.json()["id"]
+    assert res_sub.status_code == 201
+    pay_id = res_sub.json()["payment_id"]
 
-    # 2. Supervisor rejects payment
     res_reject = client_with_db.patch(
-        f"/api/v1/payments/{p1_id}/reject",
+        f"{BASE}/payments/{pay_id}/reject",
         json={"rejection_reason": "Reference code is invalid or unconfirmed"},
-        headers={"Authorization": f"Bearer {sup_token}"},
+        headers=sup_headers,
     )
     assert res_reject.status_code == 200
     assert res_reject.json()["status"] == "REJECTED"
-
-    # 3. Student creates a new payment attempt for the same reservation
-    res2 = client_with_db.post(
-        "/api/v1/payments",
-        json={
-            "reservation_id": reservation.id,
-            "method": "INSTAPAY",
-            "transaction_reference": "IP-CORRECT-REF",
-        },
-        headers={"Authorization": f"Bearer {std_token}"},
-    )
-    assert res2.status_code == 201
-    assert res2.json()["id"] != p1_id
-    assert res2.json()["status"] == "SUBMITTED"
+    assert "invalid" in res_reject.json()["notes"].lower()
 
 
-def test_cancellation_and_duplicate_conflict(
+def test_submit_pending_cash_then_cancel(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, _, _, _, reservation, _, std_token = _setup_api_prerequisites(db_session)
-
-    # 1. Create first payment
-    res1 = client_with_db.post(
-        "/api/v1/payments",
-        json={"reservation_id": reservation.id, "method": "CASH"},
-        headers={"Authorization": f"Bearer {std_token}"},
+    """Cash payments start PENDING; student can submit a reference then cancel."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_cash_cancel", RoleEnum.STUDENT
     )
-    assert res1.status_code == 201
-    p1_id = res1.json()["id"]
+    headers = {"Authorization": f"Bearer {std_token}"}
 
-    # 2. Creating another payment while first is active fails -> 409 Conflict
-    res_dup = client_with_db.post(
-        "/api/v1/payments",
-        json={"reservation_id": reservation.id, "method": "VODAFONE_CASH"},
-        headers={"Authorization": f"Bearer {std_token}"},
+    start_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
+    res_sub = client_with_db.post(
+        f"{BASE}/subscriptions",
+        json={"plan_id": plan.id, "start_date": start_date, "payment_method": "CASH"},
+        headers=headers,
     )
-    assert res_dup.status_code == 409
+    assert res_sub.status_code == 201
+    pay_id = res_sub.json()["payment_id"]
+    assert db_session.get(Payment, pay_id).status == PaymentStatus.PENDING
 
-    # 3. Student cancels the active payment
+    # Submit adds a reference (optional for cash but accepted)
+    res_submit = client_with_db.patch(
+        f"{BASE}/payments/{pay_id}/submit",
+        json={"transaction_reference": "RCPT-001"},
+        headers=headers,
+    )
+    assert res_submit.status_code == 200
+    assert res_submit.json()["status"] == "SUBMITTED"
+    assert res_submit.json()["transaction_reference"] == "RCPT-001"
+    assert res_submit.json()["paid_at"] is not None
+
+    # Cancel the submitted payment
     res_cancel = client_with_db.patch(
-        f"/api/v1/payments/{p1_id}/cancel",
-        headers={"Authorization": f"Bearer {std_token}"},
+        f"{BASE}/payments/{pay_id}/cancel", headers=headers
     )
     assert res_cancel.status_code == 200
     assert res_cancel.json()["status"] == "CANCELLED"
-
-    # 4. Now student can create a new payment attempt -> 201
-    res_new = client_with_db.post(
-        "/api/v1/payments",
-        json={"reservation_id": reservation.id, "method": "VODAFONE_CASH"},
-        headers={"Authorization": f"Bearer {std_token}"},
-    )
-    assert res_new.status_code == 201
 
 
 def test_ownership_enforcement(
     client_with_db: TestClient, db_session: Session
 ) -> None:
-    _, _, _, _, reservation, _, s1_token = _setup_api_prerequisites(db_session)
-    _, s2_token = _create_user_and_token(
-        db_session, "s2_pay_owner@test.edu", RoleEnum.STUDENT
-    )
+    """Student 2 cannot view, cancel, or submit Student 1's payment."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    s1, s1_token = _create_user_and_token(db_session, "s1_pay_owner", RoleEnum.STUDENT)
+    s2, s2_token = _create_user_and_token(db_session, "s2_pay_owner", RoleEnum.STUDENT)
 
-    # Student 1 creates payment
-    res_p1 = client_with_db.post(
-        "/api/v1/payments",
-        json={"reservation_id": reservation.id, "method": "CASH"},
-        headers={"Authorization": f"Bearer {s1_token}"},
+    subscription = _make_raw_qr_subscription(db_session, s1, plan)
+    payment = Payment(
+        student_id=s1.id,
+        subscription_id=subscription.id,
+        amount=plan.price,
+        currency="EGP",
+        method=PaymentMethod.CASH,
+        status=PaymentStatus.PENDING,
     )
-    assert res_p1.status_code == 201
-    p_id = res_p1.json()["id"]
+    db_session.add(payment)
+    db_session.commit()
+    db_session.refresh(payment)
+    payment_id = payment.id
 
     # Student 2 cannot view Student 1's payment -> 403
     assert (
         client_with_db.get(
-            f"/api/v1/payments/{p_id}",
+            f"{BASE}/payments/{payment_id}",
             headers={"Authorization": f"Bearer {s2_token}"},
         ).status_code
         == 403
@@ -463,7 +397,7 @@ def test_ownership_enforcement(
     # Student 2 cannot cancel Student 1's payment -> 403
     assert (
         client_with_db.patch(
-            f"/api/v1/payments/{p_id}/cancel",
+            f"{BASE}/payments/{payment_id}/cancel",
             headers={"Authorization": f"Bearer {s2_token}"},
         ).status_code
         == 403
@@ -472,9 +406,90 @@ def test_ownership_enforcement(
     # Student 2 cannot submit Student 1's payment -> 403
     assert (
         client_with_db.patch(
-            f"/api/v1/payments/{p_id}/submit",
+            f"{BASE}/payments/{payment_id}/submit",
             json={"transaction_reference": "IP-123"},
             headers={"Authorization": f"Bearer {s2_token}"},
         ).status_code
         == 403
     )
+
+    # Owner can view
+    assert (
+        client_with_db.get(
+            f"{BASE}/payments/{payment_id}",
+            headers={"Authorization": f"Bearer {s1_token}"},
+        ).status_code
+        == 200
+    )
+
+
+def test_payment_listing_and_filters(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Student /my lists own payments; CEO lists all with filters; supervisor read access."""
+    _setup_transit(db_session)
+    plan = _create_plan(db_session)
+    student, std_token = _create_user_and_token(
+        db_session, "student_list_pay", RoleEnum.STUDENT
+    )
+    sup, sup_token = _create_user_and_token(
+        db_session, "sup_list_pay", RoleEnum.SUPERVISOR
+    )
+    ceo, ceo_token = _create_user_and_token(db_session, "ceo_list_pay", RoleEnum.CEO)
+
+    subscription = _make_raw_qr_subscription(db_session, student, plan)
+    payment = Payment(
+        student_id=student.id,
+        subscription_id=subscription.id,
+        amount=plan.price,
+        currency="EGP",
+        method=PaymentMethod.VODAFONE_CASH,
+        status=PaymentStatus.SUBMITTED,
+        transaction_reference="VC-LIST-1",
+    )
+    db_session.add(payment)
+    db_session.commit()
+    db_session.refresh(payment)
+
+    # Student sees own payment via /my
+    res_my = client_with_db.get(
+        f"{BASE}/payments/my",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res_my.status_code == 200
+    assert res_my.json()["total"] == 1
+    assert res_my.json()["items"][0]["id"] == payment.id
+
+    # Filter by method
+    res_my_filtered = client_with_db.get(
+        f"{BASE}/payments/my?method=VODAFONE_CASH",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res_my_filtered.json()["total"] == 1
+    res_my_wrong_method = client_with_db.get(
+        f"{BASE}/payments/my?method=INSTAPAY",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res_my_wrong_method.json()["total"] == 0
+
+    # Supervisor can list all (read)
+    res_sup = client_with_db.get(
+        f"{BASE}/payments", headers={"Authorization": f"Bearer {sup_token}"}
+    )
+    assert res_sup.status_code == 200
+    assert res_sup.json()["total"] >= 1
+
+    # CEO can filter by student
+    res_ceo = client_with_db.get(
+        f"{BASE}/payments?student_id={student.id}&status=SUBMITTED",
+        headers={"Authorization": f"Bearer {ceo_token}"},
+    )
+    assert res_ceo.status_code == 200
+    assert res_ceo.json()["total"] == 1
+
+    # CEO cannot see payments for unknown student filter
+    res_ceo_none = client_with_db.get(
+        f"{BASE}/payments?student_id={ceo.id}",
+        headers={"Authorization": f"Bearer {ceo_token}"},
+    )
+    assert res_ceo_none.json()["total"] == 0

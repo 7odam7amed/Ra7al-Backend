@@ -6,7 +6,6 @@ from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.route_repository import RouteRepository
-from app.repositories.route_stop_repository import RouteStopRepository
 from app.repositories.station_repository import StationRepository
 from app.repositories.subscription_plan_repository import (
     SubscriptionPlanRepository,
@@ -24,7 +23,6 @@ __all__ = [
     "ReservationRepository",
 
     "RouteRepository",
-    "RouteStopRepository",
     "StationRepository",
     "SubscriptionPlanRepository",
     "SubscriptionRepository",

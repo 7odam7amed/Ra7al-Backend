@@ -108,7 +108,7 @@ Legend: ✓ allowed, ✗ forbidden, ◐ allowed with relationship/ownership cond
 | Endpoint | CEO | SUPERVISOR | STUDENT |
 |---|:-:|:-:|:-:|
 | `POST /reservations` (book seat) | ✗ | ✗ | ✓ |
-| `GET /reservations/available-trips` | ✓ | ✓ | ✓ |
+| `GET /reservations/upcoming-trips` | ✗ | ✗ | ✓ |
 | `GET /reservations/my` | ✗ | ✗ | ✓ |
 | `GET /reservations` (all, filtered) | ✓ | ✓ | ✗ |
 | `GET /reservations/{id}` | ✓ | ✓ | ◐ own reservation |

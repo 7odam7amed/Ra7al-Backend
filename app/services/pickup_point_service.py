@@ -1,7 +1,9 @@
-from app.exceptions.base import NotFoundError, ValidationError
+from app.exceptions.base import ConflictError, NotFoundError, ValidationError
 from app.models.pickup_point import PickupPoint
 from app.repositories.pickup_point_repository import PickupPointRepository
-from app.repositories.trip_repository import TripRepository
+from app.repositories.reservation_repository import ReservationRepository
+from app.repositories.route_repository import RouteRepository
+from app.repositories.trip_stop_repository import TripStopRepository
 from app.schemas.pickup_point import (
     PickupPointCreateRequest,
     PickupPointUpdateRequest,
@@ -9,53 +11,69 @@ from app.schemas.pickup_point import (
 
 
 class PickupPointService:
-    """Service handling pickup/gathering points business logic."""
+    """Service handling route-owned pickup points (CEO management + student listing)."""
 
     def __init__(
         self,
         pickup_point_repo: PickupPointRepository,
-        trip_repo: TripRepository,
+        route_repo: RouteRepository,
+        trip_stop_repo: TripStopRepository | None = None,
+        reservation_repo: ReservationRepository | None = None,
     ) -> None:
         self.pickup_point_repo = pickup_point_repo
-        self.trip_repo = trip_repo
+        self.route_repo = route_repo
+        self.trip_stop_repo = trip_stop_repo
+        self.reservation_repo = reservation_repo
 
     def add_pickup_point(
-        self, trip_id: int, data: PickupPointCreateRequest
+        self, data: PickupPointCreateRequest
     ) -> PickupPoint:
-        """Add a pickup point to a trip (CEO action only)."""
-        trip = self.trip_repo.get_by_id(trip_id)
-        if not trip:
-            raise NotFoundError(f"Trip with ID {trip_id} not found")
+        """Create a pickup point under exactly one route (CEO action only)."""
+        route = self.route_repo.get_by_id(data.route_id)
+        if not route:
+            raise NotFoundError(f"Route with ID {data.route_id} not found")
 
-        if data.sequence < 1:
-            raise ValidationError("Sequence must be greater than or equal to 1")
+        if self.pickup_point_repo.exists_for_route(data.route_id, data.name):
+            raise ConflictError(
+                f"A pickup point named '{data.name}' already exists on route {data.route_id}"
+            )
 
         return self.pickup_point_repo.create(
-            trip_id=trip_id,
+            route_id=data.route_id,
             name=data.name,
             address=data.address,
             sequence=data.sequence,
         )
 
-    def list_pickup_points_by_trip(self, trip_id: int) -> list[PickupPoint]:
-        """Retrieve all pickup points for a trip ordered by sequence."""
-        trip = self.trip_repo.get_by_id(trip_id)
-        if not trip:
-            raise NotFoundError(f"Trip with ID {trip_id} not found")
-        return self.pickup_point_repo.list_by_trip(trip_id)
+    def get_pickup_point(self, point_id: int) -> PickupPoint:
+        """Fetch a pickup point or raise NotFoundError."""
+        point = self.pickup_point_repo.get_by_id(point_id)
+        if not point:
+            raise NotFoundError(f"Pickup point with ID {point_id} not found")
+        return point
+
+    def list_pickup_points_by_route(self, route_id: int) -> list[PickupPoint]:
+        """All points of a route ordered by sequence (student-safe listing)."""
+        route = self.route_repo.get_by_id(route_id)
+        if not route:
+            raise NotFoundError(f"Route with ID {route_id} not found")
+        return self.pickup_point_repo.list_by_route(route_id)
+
+    def list_all_pickup_points(self) -> list[PickupPoint]:
+        """All pickup points across routes (CEO view)."""
+        return list(self.db_scalars_all())
 
     def update_pickup_point(
-        self, trip_id: int, point_id: int, data: PickupPointUpdateRequest
+        self, point_id: int, data: PickupPointUpdateRequest
     ) -> PickupPoint:
-        """Update an existing pickup point (CEO action only)."""
-        point = self.pickup_point_repo.get_by_id(point_id)
-        if not point or point.trip_id != trip_id:
-            raise NotFoundError(
-                f"Pickup point with ID {point_id} not found for trip {trip_id}"
-            )
+        """Update a pickup point (route ownership is immutable)."""
+        point = self.get_pickup_point(point_id)
 
-        if data.sequence is not None and data.sequence < 1:
-            raise ValidationError("Sequence must be greater than or equal to 1")
+        if data.name is not None and data.name != point.name:
+            if self.pickup_point_repo.exists_for_route(point.route_id, data.name):
+                raise ConflictError(
+                    f"A pickup point named '{data.name}' already exists on route {point.route_id}"
+                )
 
         return self.pickup_point_repo.update(
             point=point,
@@ -64,12 +82,25 @@ class PickupPointService:
             sequence=data.sequence,
         )
 
-    def delete_pickup_point(self, trip_id: int, point_id: int) -> None:
-        """Delete a pickup point from a trip (CEO action only)."""
-        point = self.pickup_point_repo.get_by_id(point_id)
-        if not point or point.trip_id != trip_id:
-            raise NotFoundError(
-                f"Pickup point with ID {point_id} not found for trip {trip_id}"
+    def delete_pickup_point(self, point_id: int) -> None:
+        """Delete a pickup point unless referenced by trips or bookings."""
+        point = self.get_pickup_point(point_id)
+
+        if self.trip_stop_repo is not None and self.trip_stop_repo.exists_for_point(point_id):
+            raise ConflictError(
+                f"Pickup point {point_id} is used by one or more trips and cannot be deleted"
+            )
+
+        if (
+            self.reservation_repo is not None
+            and self.reservation_repo.count_for_pickup_point(point_id) > 0
+        ):
+            raise ConflictError(
+                f"Pickup point {point_id} is referenced by student bookings and cannot be deleted"
             )
 
         self.pickup_point_repo.delete(point)
+
+    def db_scalars_all(self):
+        """List all pickup points ordered by route and sequence."""
+        return self.pickup_point_repo.list_all()

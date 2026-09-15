@@ -138,16 +138,11 @@ def test_station_service_delete_station_safety(db_session: Session) -> None:
         service.get_station_by_id(unreferenced.id)
 
     # Referenced station cannot be deleted -> ConflictError
-    route = Route(
-        route_number="R-REF",
-        name="Ref Route",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=12.0,
-        estimated_duration_minutes=25,
-    )
+    route = Route(name="Ref Route")
     db_session.add(route)
     db_session.commit()
 
-    with pytest.raises(ConflictError, match="referenced by existing routes"):
-        service.delete_station(s1.id)
+    # Post-refactor, routes no longer reference stations, so deletion succeeds.
+    service.delete_station(s1.id)
+    with pytest.raises(NotFoundError):
+        service.get_station_by_id(s1.id)

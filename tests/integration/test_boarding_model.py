@@ -12,6 +12,7 @@ from app.models.enums import (
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
 from app.models.pickup_point import PickupPoint
@@ -55,11 +56,6 @@ def test_boarding_model_and_relationships(db_session: Session) -> None:
 
     route = Route(
         name="Main Route",
-        route_number="MR-02",
-        origin_station_id=station_1.id,
-        destination_station_id=station_2.id,
-        distance_km=20.0,
-        estimated_duration_minutes=30,
         is_active=True,
     )
     plan = SubscriptionPlan(
@@ -75,18 +71,18 @@ def test_boarding_model_and_relationships(db_session: Session) -> None:
     now_utc = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction=TripDirection.OUTBOUND,
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now_utc,
         estimated_arrival_time=now_utc + timedelta(hours=1),
         passenger_capacity=30,
-        fare_amount=Decimal("50.00"),
         status=TripStatus.SCHEDULED,
     )
     db_session.add(trip)
     db_session.flush()
 
-    pickup = PickupPoint(trip_id=trip.id, name="Gate 1", sequence=1)
+    pickup = PickupPoint(route_id=route.id, name="Gate 1", sequence=1)
     db_session.add(pickup)
     db_session.flush()
 

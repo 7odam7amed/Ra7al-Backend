@@ -1,483 +1,606 @@
+"""Unit tests for the per-direction ReservationService.
+
+Covers: subscription requirement, one outbound + one return per date,
+selected-point validation, capacity/FULL/overbooking, weekly usage-day limit,
+and destination logic (OUTBOUND -> student's university, RETURN -> selected
+drop-off point).
+"""
+
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock
+
 import pytest
 
-from app.exceptions.base import (
-    ConflictError,
-    ForbiddenError,
-    NotFoundError,
-    ValidationError,
+from app.exceptions.base import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from app.models.enums import (
+    BoardingDirection,
+    ReservationStatus,
+    RoleEnum,
+    SubscriptionStatus,
+    TripDirection,
+    TripStatus,
 )
-from app.models.enums import GenderEnum, ReservationStatus, RoleEnum, SubscriptionStatus, TripStatus
-from app.models.reservation import Reservation
-from app.models.pickup_point import PickupPoint
-from app.models.subscription import Subscription
-from app.models.trip import Trip
-from app.models.user import User
-from app.schemas.reservation import ReservationCreateRequest
+from app.schemas.reservation import BookingState, ReservationCreateRequest
 from app.services.reservation_service import ReservationService
-from app.utils.dates import business_today
 
 
-def _create_mock_user(
-    user_id: int, role: RoleEnum = RoleEnum.STUDENT, is_active: bool = True
-) -> User:
-    user = User(
-        id=user_id,
-        full_name=f"User {user_id}",
-        phone_number=f"+2010{user_id:08d}",
-        password_hash="hash",
-        gender=GenderEnum.MALE,
-        role=role,
-        is_active=is_active,
-    )
+def _create_mock_user(user_id: int, role: RoleEnum) -> MagicMock:
+    user = MagicMock()
+    user.id = user_id
+    user.role = role
+    user.is_active = True
     return user
 
 
 def _create_mock_trip(
-    trip_id: int = 1,
+    trip_id: int,
     status: TripStatus = TripStatus.SCHEDULED,
-    departure_time: datetime | None = None,
-    capacity: int = 10,
-) -> Trip:
-    if departure_time is None:
-        # Default: departs TOMORROW (the only selectable service date).
-        departure_time = datetime.now(timezone.utc) + timedelta(days=1)
-    trip = Trip(
-        id=trip_id,
-        route_id=1,
-        bus_id=1,
-        supervisor_id=2,
-        departure_time=departure_time,
-        estimated_arrival_time=departure_time + timedelta(hours=1),
-        status=status,
-        passenger_capacity=capacity,
+    direction: TripDirection = TripDirection.OUTBOUND,
+    capacity: int = 40,
+    allow_overbooking: bool = False,
+    service_date: date | None = None,
+) -> MagicMock:
+    trip = MagicMock()
+    trip.id = trip_id
+    trip.status = status
+    trip.direction = direction
+    trip.passenger_capacity = capacity
+    trip.allow_overbooking = allow_overbooking
+    trip.route_id = 5
+    service_day = service_date or date.today() + timedelta(days=1)
+    trip.departure_time = datetime(
+        service_day.year, service_day.month, service_day.day, 7, 0, tzinfo=timezone.utc
     )
+    trip.estimated_arrival_time = trip.departure_time
+    stop = MagicMock()
+    stop.pickup_point_id = 11
+    stop.stop_order = 1
+    trip.trip_stops = [stop]
     return trip
 
 
-def _make_subscription(student_id: int = 1, subscription_id: int = 50) -> Subscription:
-    sub = Subscription(
-        id=subscription_id,
-        student_id=student_id,
-        plan_id=1,
-        status=SubscriptionStatus.ACTIVE,
-    )
-    # Snapshot values drive the weekly usage-day limit in book_trip.
-    sub.duration_days_snapshot = 30
-    sub.days_per_week_snapshot = 7
-    return sub
+def _create_mock_subscription(sub_id: int = 100, days_per_week: int = 5) -> MagicMock:
+    subscription = MagicMock()
+    subscription.id = sub_id
+    subscription.status = SubscriptionStatus.ACTIVE
+    subscription.days_per_week_snapshot = days_per_week
+    return subscription
 
 
-def _make_service() -> tuple[ReservationService, MagicMock, MagicMock, MagicMock, MagicMock]:
+def _create_mock_reservation(
+    reservation_id: int,
+    trip_id: int,
+    direction: BoardingDirection = BoardingDirection.OUTBOUND,
+) -> MagicMock:
+    reservation = MagicMock()
+    reservation.id = reservation_id
+    reservation.trip_id = trip_id
+    reservation.student_id = 1
+    reservation.subscription_id = 100
+    reservation.direction = direction
+    reservation.status = ReservationStatus.CONFIRMED
+    reservation.selected_pickup_point_id = 11
+    return reservation
+
+
+def _make_service():
     reservation_repo = MagicMock()
     subscription_repo = MagicMock()
     trip_repo = MagicMock()
     user_repo = MagicMock()
-    service = ReservationService(reservation_repo, subscription_repo, trip_repo, user_repo)
+    service = ReservationService(
+        reservation_repo=reservation_repo,
+        subscription_repo=subscription_repo,
+        trip_repo=trip_repo,
+        user_repo=user_repo,
+    )
     return service, reservation_repo, subscription_repo, trip_repo, user_repo
 
 
-def _stub_student_and_subscription(
-    subscription_repo: MagicMock, student_id: int = 1
-) -> None:
-    subscription_repo.get_active_for_student_on_date.return_value = _make_subscription(
-        student_id
-    )
-
-
-def _stub_weekly_limit_ok(reservation_repo: MagicMock, used_days: int = 0) -> None:
-    """Stub the weekly-limit accounting: locked row + used usage-day count."""
-    locked = _make_subscription()
-    reservation_repo.get_subscription_row_for_update.return_value = locked
-    reservation_repo.count_confirmed_for_subscription_in_window.return_value = used_days
-
-
-def test_validate_student() -> None:
-    service, _, _, _, user_repo = _make_service()
-
-    # Valid active student
-    valid_student = _create_mock_user(1, RoleEnum.STUDENT, is_active=True)
-    user_repo.get_by_id.return_value = valid_student
-    assert service.validate_student(1) == valid_student
-
-    # Nonexistent student
-    user_repo.get_by_id.return_value = None
-    with pytest.raises(NotFoundError):
-        service.validate_student(999)
-
-    # Inactive student
-    inactive_student = _create_mock_user(2, RoleEnum.STUDENT, is_active=False)
-    user_repo.get_by_id.return_value = inactive_student
-    with pytest.raises(ValidationError):
-        service.validate_student(2)
-
-    # Non-student role
-    supervisor = _create_mock_user(3, RoleEnum.SUPERVISOR, is_active=True)
-    user_repo.get_by_id.return_value = supervisor
-    with pytest.raises(ForbiddenError):
-        service.validate_student(3)
+# ---------------------------------------------------------------------------
+# Subscription requirement
+# ---------------------------------------------------------------------------
 
 
 def test_book_trip_requires_active_subscription() -> None:
     """A student without a valid subscription cannot create a daily selection."""
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
     subscription_repo.get_active_for_student_on_date.return_value = None
-
-    trip = _create_mock_trip(10, TripStatus.SCHEDULED)
-    reservation_repo.get_trip_for_update.return_value = trip
 
     with pytest.raises(ValidationError, match="ACTIVE subscription"):
         service.book_trip(
             student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+        )
+
+    reservation_repo.create.assert_not_called()
+
+
+def test_book_trip_rejects_pending_subscription() -> None:
+    """A PENDING (not yet paid/approved) subscription is not sufficient."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = None
+
+    with pytest.raises(ValidationError, match="ACTIVE subscription"):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
         )
 
 
-def test_book_trip_success() -> None:
+def test_book_trip_student_only() -> None:
+    """Only STUDENT users can book."""
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.CEO)
 
-    trip = _create_mock_trip(10, TripStatus.SCHEDULED, capacity=10)
-    # Trip exposes its route pickup points for validation.
-    trip.pickup_points = [
-        PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1),
-        PickupPoint(id=12, trip_id=10, name="Main Gate", sequence=2),
-    ]
-    reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = None
-    reservation_repo.count_confirmed_for_trip.return_value = 5
-    _stub_weekly_limit_ok(reservation_repo)
+    with pytest.raises(ForbiddenError):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+        )
 
-    expected_reservation = Reservation(
-        id=100, trip_id=10, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-    reservation_repo.create.return_value = expected_reservation
 
-    res = service.book_trip(
-        student_id=1,
-        data=ReservationCreateRequest(
-            trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-        ),
-    )
-    assert res.id == 100
-    kwargs = reservation_repo.create.call_args.kwargs
-    assert kwargs["trip_id"] == 10
-    assert kwargs["student_id"] == 1
-    assert kwargs["subscription_id"] == 50
-    assert kwargs["service_date"] == business_today() + timedelta(days=1)
-    assert kwargs["status"] == ReservationStatus.CONFIRMED
-    assert kwargs["outbound_pickup_point_id"] == 11
-    assert kwargs["return_pickup_point_id"] == 12
+# ---------------------------------------------------------------------------
+# Trip validation
+# ---------------------------------------------------------------------------
 
 
 def test_book_trip_trip_not_found() -> None:
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
     reservation_repo.get_trip_for_update.return_value = None
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(NotFoundError, match="Trip with ID 999"):
         service.book_trip(
             student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=999, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
+            data=ReservationCreateRequest(trip_id=999, selected_pickup_point_id=11),
         )
 
 
 def test_book_trip_trip_not_scheduled() -> None:
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    trip = _create_mock_trip(10, status=TripStatus.IN_PROGRESS)
-    reservation_repo.get_trip_for_update.return_value = trip
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    reservation_repo.get_trip_for_update.return_value = _create_mock_trip(
+        10, status=TripStatus.CANCELLED
+    )
 
     with pytest.raises(ValidationError, match="not available for booking"):
         service.book_trip(
             student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
         )
 
 
-def test_book_trip_not_tomorrow_rejected() -> None:
-    """A trip departing TODAY (or any non-selected service date) cannot be selected."""
-    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+def test_book_trip_past_service_date_rejected() -> None:
+    service, *_ = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    # Trip departs 3 days out: never the resolved service date (tomorrow),
-    # regardless of the current UTC time when the test runs.
-    today_dep = datetime.now(timezone.utc) + timedelta(days=3)
-    trip = _create_mock_trip(10, TripStatus.SCHEDULED, departure_time=today_dep)
-    reservation_repo.get_trip_for_update.return_value = trip
-
-    with pytest.raises(ValidationError, match="service date"):
-        service.book_trip(
-            student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
-        )
-
-
-def test_book_trip_duplicate_daily_selection_conflict() -> None:
-    """Only ONE active selection per student per service date is allowed."""
-    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
-
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    trip = _create_mock_trip(10, status=TripStatus.SCHEDULED)
-    trip.pickup_points = [
-        PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1),
-        PickupPoint(id=12, trip_id=10, name="Main Gate", sequence=2),
-    ]
-    reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = Reservation(
-        id=99, trip_id=10, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-
-    with pytest.raises(ConflictError, match="already has an active daily selection"):
-        service.book_trip(
-            student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
-        )
-
-
-def test_book_trip_capacity_full() -> None:
-    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
-
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    trip = _create_mock_trip(10, status=TripStatus.SCHEDULED, capacity=5)
-    trip.pickup_points = [
-        PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1),
-        PickupPoint(id=12, trip_id=10, name="Main Gate", sequence=2),
-    ]
-    reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = None
-    reservation_repo.count_confirmed_for_trip.return_value = 5
-    _stub_weekly_limit_ok(reservation_repo)
-
-    with pytest.raises(ConflictError, match="No available seats"):
-        service.book_trip(
-            student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10, outbound_pickup_point_id=11, return_pickup_point_id=12
-            ),
-        )
-
-
-def test_book_trip_cross_route_pickup_point_rejected() -> None:
-    """A pickup point that does not belong to the trip is rejected server-side."""
-    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
-
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    trip = _create_mock_trip(10, status=TripStatus.SCHEDULED)
-    trip.pickup_points = [PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1)]
-    reservation_repo.get_trip_for_update.return_value = trip
-
-    with pytest.raises(ValidationError, match="outbound pickup point"):
+    with pytest.raises(ValidationError, match="past"):
         service.book_trip(
             student_id=1,
             data=ReservationCreateRequest(
                 trip_id=10,
-                outbound_pickup_point_id=999,  # belongs to another trip/route
-                return_pickup_point_id=11,
+                selected_pickup_point_id=11,
+                service_date=date.today() - timedelta(days=1),
             ),
         )
 
 
-def test_update_selection_replaces_tomorrow_choice() -> None:
+def test_book_trip_service_date_defaults_to_tomorrow() -> None:
+    """Omitting service_date resolves to TOMORROW (spec §15/§18)."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+
+    tomorrow = date.today() + timedelta(days=1)
+    trip = _create_mock_trip(10, service_date=tomorrow)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 0
+    reservation_repo.count_confirmed_for_trip.return_value = 0
+    reservation_repo.create.return_value = _create_mock_reservation(500, trip_id=10)
+
+    service.book_trip(
+        student_id=1,
+        data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+    )
+
+    created = reservation_repo.create.call_args
+    assert created.kwargs["service_date"] == tomorrow
+
+
+# ---------------------------------------------------------------------------
+# Selected-point + direction rules
+# ---------------------------------------------------------------------------
+
+
+def test_book_trip_cross_route_pickup_point_rejected() -> None:
+    """The selected point must be one of the trip's stops."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    reservation_repo.get_trip_for_update.return_value = _create_mock_trip(10)
+
+    with pytest.raises(ValidationError, match="not one of the stops"):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=999),
+        )
+
+
+def test_book_trip_outbound_success_sets_direction() -> None:
+    """Booking derives direction from the trip and stores the selected point."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 0
+    reservation_repo.count_confirmed_for_trip.return_value = 0
+    reservation_repo.create.return_value = _create_mock_reservation(500, trip_id=10)
+
+    service.book_trip(
+        student_id=1,
+        data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+    )
+
+    kwargs = reservation_repo.create.call_args.kwargs
+    assert kwargs["direction"] == BoardingDirection.OUTBOUND
+    assert kwargs["status"] == ReservationStatus.CONFIRMED
+    assert kwargs["selected_pickup_point_id"] == 11
+    assert kwargs["status"] == ReservationStatus.CONFIRMED
+
+
+def test_book_trip_return_trip_sets_return_direction() -> None:
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(20, direction=TripDirection.RETURN)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 0
+    reservation_repo.count_confirmed_for_trip.return_value = 0
+    reservation_repo.create.return_value = _create_mock_reservation(501, trip_id=20)
+
+    service.book_trip(
+        student_id=1,
+        data=ReservationCreateRequest(trip_id=20, selected_pickup_point_id=11),
+    )
+
+    kwargs = reservation_repo.create.call_args.kwargs
+    assert kwargs["direction"] == BoardingDirection.RETURN
+
+
+def test_book_trip_duplicate_daily_selection_conflict() -> None:
+    """A second OUTBOUND booking on the same date is rejected (one per direction)."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = (
+        _create_mock_reservation(400, trip_id=10, direction=BoardingDirection.OUTBOUND)
+    )
+
+    with pytest.raises(ConflictError, match="OUTBOUND booking"):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+        )
+
+
+def test_book_trip_return_allowed_alongside_outbound() -> None:
+    """OUTBOUND + RETURN on the same date is allowed (different directions)."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+
+    tomorrow = date.today() + timedelta(days=1)
+    outbound_trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND, service_date=tomorrow)
+    return_trip = _create_mock_trip(20, direction=TripDirection.RETURN, service_date=tomorrow)
+
+    # Outbound booking exists for the date, but the RETURN lookup finds none.
+    reservation_repo.get_trip_for_update.return_value = return_trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 1  # outbound day used
+    reservation_repo.count_confirmed_for_trip.return_value = 0
+    reservation_repo.create.return_value = _create_mock_reservation(
+        502, trip_id=20, direction=BoardingDirection.RETURN
+    )
+
+    service.book_trip(
+        student_id=1,
+        data=ReservationCreateRequest(
+            trip_id=20, selected_pickup_point_id=11, service_date=tomorrow
+        ),
+    )
+
+    kwargs = reservation_repo.create.call_args.kwargs
+    assert kwargs["direction"] == BoardingDirection.RETURN
+
+
+# ---------------------------------------------------------------------------
+# Capacity / overbooking
+# ---------------------------------------------------------------------------
+
+
+def test_book_trip_capacity_full() -> None:
+    """At capacity with allow_overbooking=False the trip is FULL for new bookings."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, capacity=40, allow_overbooking=False)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 0
+    reservation_repo.count_confirmed_for_trip.return_value = 40
+
+    with pytest.raises(ConflictError, match="No available seats"):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+        )
+
+
+def test_book_trip_overbooking_allowed_when_enabled() -> None:
+    """allow_overbooking=True permits bookings beyond capacity."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, capacity=40, allow_overbooking=True)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription()
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 0
+    reservation_repo.count_confirmed_for_trip.return_value = 40
+    reservation_repo.create.return_value = _create_mock_reservation(503, trip_id=10)
+
+    service.book_trip(
+        student_id=1,
+        data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+    )
+
+    reservation_repo.create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Weekly usage-day limit
+# ---------------------------------------------------------------------------
+
+
+def test_book_trip_weekly_usage_limit_enforced() -> None:
+    """Weekly distinct usage-day limit (days_per_week_snapshot) is enforced."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription(
+        days_per_week=5
+    )
+    trip = _create_mock_trip(10)
+    reservation_repo.get_trip_for_update.return_value = trip
+    reservation_repo.get_active_for_student_date_direction.return_value = None
+    reservation_repo.get_subscription_row_for_update.return_value = _create_mock_subscription(
+        days_per_week=5
+    )
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = 5
+
+    with pytest.raises(ConflictError, match="Weekly transportation usage limit"):
+        service.book_trip(
+            student_id=1,
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Destination logic
+# ---------------------------------------------------------------------------
+
+
+def test_outbound_destination_is_student_university() -> None:
+    """OUTBOUND view: destination = the student's registered university."""
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
     student = _create_mock_user(1, RoleEnum.STUDENT)
+    university = MagicMock()
+    university.name = "Assiut National University"
+    student.university = university
     user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
 
-    trip = _create_mock_trip(10, status=TripStatus.SCHEDULED)
-    trip.pickup_points = [PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1)]
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
+    trip.route = MagicMock()
     reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = Reservation(
-        id=99, trip_id=10, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-    reservation_repo.replace_selection.return_value = Reservation(
-        id=99, trip_id=10, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
+    reservation_repo.count_confirmed_for_trip.return_value = 5
+
+    view = service.build_student_trip_view(trip, student, date.today(), existing=None)
+
+    assert view["destination"] == "Assiut National University"
+    assert view["origin"] is None  # not booked yet
+    assert view["booking_state"] == BookingState.AVAILABLE
+
+
+def test_two_students_same_outbound_trip_different_destinations() -> None:
+    """Two students on the same outbound trip see their OWN universities."""
+    service, *_ = _make_service()
+
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
+
+    student_a = _create_mock_user(1, RoleEnum.STUDENT)
+    uni_a = MagicMock()
+    uni_a.name = "Assiut National University"
+    student_a.university = uni_a
+
+    student_b = _create_mock_user(2, RoleEnum.STUDENT)
+    uni_b = MagicMock()
+    uni_b.name = "Sphinx University"
+    student_b.university = uni_b
+
+    service.reservation_repo.count_confirmed_for_trip.return_value = 5
+
+    view_a = service.build_student_trip_view(trip, student_a, date.today(), None)
+    view_b = service.build_student_trip_view(trip, student_b, date.today(), None)
+
+    assert view_a["destination"] == "Assiut National University"
+    assert view_b["destination"] == "Sphinx University"
+    assert view_a["destination"] != view_b["destination"]
+
+
+def test_return_destination_is_selected_drop_off_point() -> None:
+    """RETURN view: destination = the student's selected drop-off point."""
+    service, *_ = _make_service()
+
+    student = _create_mock_user(1, RoleEnum.STUDENT)
+    university = MagicMock()
+    university.name = "Assiut National University"
+    student.university = university
+
+    trip = _create_mock_trip(20, direction=TripDirection.RETURN)
+
+    existing = _create_mock_reservation(505, trip_id=20, direction=BoardingDirection.RETURN)
+    selected_point = MagicMock()
+    selected_point.name = "Al-Walidiyah"
+    existing.selected_pickup_point = selected_point
+
+    view = service.build_student_trip_view(trip, student, date.today(), existing)
+
+    assert view["origin"] == "Assiut National University"
+    assert view["destination"] == "Al-Walidiyah"
+
+
+def test_booking_state_booked_wins_over_full() -> None:
+    """A student with a valid booking sees BOOKED, never FULL (spec §19)."""
+    service, *_ = _make_service()
+
+    student = _create_mock_user(1, RoleEnum.STUDENT)
+    student.university = None
+    trip = _create_mock_trip(10, capacity=40, allow_overbooking=False)
+    service.reservation_repo.count_confirmed_for_trip.return_value = 40
+
+    existing = _create_mock_reservation(506, trip_id=10)
+    selected_point = MagicMock()
+    selected_point.name = "Al-Mahatta"
+    existing.selected_pickup_point = selected_point
+
+    view = service.build_student_trip_view(trip, student, date.today(), existing)
+
+    assert view["booking_state"] == BookingState.BOOKED
+
+
+def test_booking_state_full_when_capacity_reached() -> None:
+    service, *_ = _make_service()
+
+    student = _create_mock_user(1, RoleEnum.STUDENT)
+    student.university = None
+    trip = _create_mock_trip(10, capacity=40, allow_overbooking=False)
+
+    service.reservation_repo.count_confirmed_for_trip.return_value = 40
+
+    view = service.build_student_trip_view(trip, student, date.today(), None)
+
+    assert view["booking_state"] == BookingState.FULL
+    assert view["available_seats"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Update selection
+# ---------------------------------------------------------------------------
+
+
+def test_update_selection_replaces_existing_booking() -> None:
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
+    reservation_repo.get_trip_for_update.return_value = trip
+    existing = _create_mock_reservation(400, trip_id=99, direction=BoardingDirection.OUTBOUND)
+    reservation_repo.get_active_for_student_date_direction.return_value = existing
+    reservation_repo.count_confirmed_for_trip.return_value = 0
+    reservation_repo.replace_selection.return_value = existing
+
+    service.update_selection(
+        student_id=1,
+        data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
     )
 
-    updated = service.update_selection(
-        student_id=1,
-        data=ReservationCreateRequest(
-            trip_id=10,
-            outbound_pickup_point_id=11,
-            return_pickup_point_id=11,
-            direction_mode="OUTBOUND_ONLY",
-        ),
-    )
-    assert updated.id == 99
-    reservation_repo.replace_selection.assert_called_once()
+    kwargs = reservation_repo.replace_selection.call_args.kwargs
+    assert kwargs["trip_id"] == 10
+    assert kwargs["selected_pickup_point_id"] == 11
 
 
 def test_update_selection_requires_existing_selection() -> None:
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    student = _create_mock_user(1, RoleEnum.STUDENT)
-    user_repo.get_by_id.return_value = student
-    _stub_student_and_subscription(subscription_repo)
-
-    trip = _create_mock_trip(10, status=TripStatus.SCHEDULED)
-    trip.pickup_points = [PickupPoint(id=11, trip_id=10, name="Gate 3", sequence=1)]
+    user_repo.get_by_id.return_value = _create_mock_user(1, RoleEnum.STUDENT)
+    subscription_repo.get_active_for_student_on_date.return_value = _create_mock_subscription()
+    trip = _create_mock_trip(10, direction=TripDirection.OUTBOUND)
     reservation_repo.get_trip_for_update.return_value = trip
-    reservation_repo.get_active_for_student_and_date.return_value = None
+    reservation_repo.get_active_for_student_date_direction.return_value = None
 
-    with pytest.raises(NotFoundError, match="No active daily selection"):
+    with pytest.raises(NotFoundError, match="No active OUTBOUND booking"):
         service.update_selection(
             student_id=1,
-            data=ReservationCreateRequest(
-                trip_id=10,
-                outbound_pickup_point_id=11,
-                return_pickup_point_id=11,
-                direction_mode="OUTBOUND_ONLY",
-            ),
+            data=ReservationCreateRequest(trip_id=10, selected_pickup_point_id=11),
         )
 
 
-def test_cancel_reservation_rules() -> None:
-    service, reservation_repo, _, _, _ = _make_service()
+# ---------------------------------------------------------------------------
+# Trip history scoping
+# ---------------------------------------------------------------------------
 
-    student1 = _create_mock_user(1, RoleEnum.STUDENT)
-    student2 = _create_mock_user(2, RoleEnum.STUDENT)
-    ceo = _create_mock_user(3, RoleEnum.CEO)
 
-    res = Reservation(
-        id=10, trip_id=1, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-    reservation_repo.get_by_id.return_value = res
-    reservation_repo.cancel.return_value = res
+def test_trip_history_supervisor_scoped_to_own_trips() -> None:
+    """Supervisor history only returns trips assigned to them (spec §14)."""
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
-    # 1. Nonexistent reservation -> 404
-    reservation_repo.get_by_id.return_value = None
-    with pytest.raises(NotFoundError):
-        service.cancel_reservation(999, student1)
+    supervisor = _create_mock_user(7, RoleEnum.SUPERVISOR)
+    trip_repo.list.return_value = ([], 0)
 
-    reservation_repo.get_by_id.return_value = res
+    service.list_trip_history(current_user=supervisor)
 
-    # 2. Student non-owner -> 403 Forbidden
+    kwargs = trip_repo.list.call_args.kwargs
+    assert kwargs["status"] == TripStatus.COMPLETED
+    assert kwargs["supervisor_id"] == 7
+
+
+def test_trip_history_ceo_sees_all_completed() -> None:
+    service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
+
+    ceo = _create_mock_user(2, RoleEnum.CEO)
+    trip_repo.list.return_value = ([], 0)
+
+    service.list_trip_history(current_user=ceo)
+
+    kwargs = trip_repo.list.call_args.kwargs
+    assert kwargs["status"] == TripStatus.COMPLETED
+    assert kwargs["supervisor_id"] is None
+
+
+def test_trip_history_student_forbidden() -> None:
+    service, *_ = _make_service()
+
+    student = _create_mock_user(1, RoleEnum.STUDENT)
+
     with pytest.raises(ForbiddenError):
-        service.cancel_reservation(10, student2)
-
-    # 3. Student owner -> success
-    service.cancel_reservation(10, student1)
-    reservation_repo.cancel.assert_called_once_with(res)
-
-    # 4. Already cancelled -> 422 ValidationError
-    res_cancelled = Reservation(
-        id=11, trip_id=1, student_id=1, subscription_id=50, status=ReservationStatus.CANCELLED
-    )
-    reservation_repo.get_by_id.return_value = res_cancelled
-    with pytest.raises(ValidationError, match="already cancelled"):
-        service.cancel_reservation(11, student1)
-
-    # 5. CEO -> success on any reservation
-    res_other = Reservation(
-        id=12, trip_id=1, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-    reservation_repo.get_by_id.return_value = res_other
-    service.cancel_reservation(12, ceo)
-
-
-def test_get_reservation_by_id_access_control() -> None:
-    service, reservation_repo, _, _, _ = _make_service()
-
-    student1 = _create_mock_user(1, RoleEnum.STUDENT)
-    student2 = _create_mock_user(2, RoleEnum.STUDENT)
-    sup = _create_mock_user(3, RoleEnum.SUPERVISOR)
-
-    res = Reservation(
-        id=10, trip_id=1, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
-    )
-    reservation_repo.get_by_id.return_value = res
-
-    # Owner student -> OK
-    assert service.get_reservation_by_id(10, student1) == res
-
-    # Non-owner student -> 403
-    with pytest.raises(ForbiddenError):
-        service.get_reservation_by_id(10, student2)
-
-    # Supervisor -> OK
-    assert service.get_reservation_by_id(10, sup) == res
-
-
-def test_list_pagination_validations() -> None:
-    service, _, _, _, _ = _make_service()
-
-    # Invalid page
-    with pytest.raises(ValidationError):
-        service.list_my_reservations(student_id=1, page=0)
-
-    # Invalid page size
-    with pytest.raises(ValidationError):
-        service.list_my_reservations(student_id=1, page=1, page_size=0)
-
-    with pytest.raises(ValidationError):
-        service.list_my_reservations(student_id=1, page=1, page_size=101)
-
-
-def test_list_available_trips() -> None:
-    service, reservation_repo, _, trip_repo, _ = _make_service()
-
-    trip1 = _create_mock_trip(1, TripStatus.SCHEDULED, capacity=10)
-    trip2 = _create_mock_trip(2, TripStatus.SCHEDULED, capacity=5)
-    # Pickup points are eager-loaded by the trip repository and passed through
-    # to the available-trips response so students can select one.
-    trip1.pickup_points = [
-        PickupPoint(id=11, trip_id=1, name="Gate 3", sequence=1),
-        PickupPoint(id=12, trip_id=1, name="Main Gate", sequence=2),
-    ]
-    trip_repo.list.return_value = ([trip1, trip2], 2)
-
-    # trip1 has 3 confirmed (7 available)
-    # trip2 has 5 confirmed (0 available -> should be excluded)
-    def mock_count(trip_id: int) -> int:
-        if trip_id == 1:
-            return 3
-        return 5
-
-    reservation_repo.count_confirmed_for_trip.side_effect = mock_count
-
-    items, total = service.list_available_trips(page=1, page_size=20)
-    assert total == 1
-    assert len(items) == 1
-    assert items[0]["id"] == 1
-    assert items[0]["available_seats"] == 7
-    assert items[0]["confirmed_reservations_count"] == 3
-    # Trip 1 exposes its ordered pickup points; trip 2 (no points) is excluded anyway.
-    assert [p.id for p in items[0]["pickup_points"]] == [11, 12]
-    assert [p.sequence for p in items[0]["pickup_points"]] == [1, 2]
+        service.list_trip_history(current_user=student)

@@ -26,7 +26,6 @@ from app.models import (  # noqa: F401
     ReservationStatus,
     RoleEnum,
     Route,
-    RouteStop,
     Station,
     Trip,
     TripStatus,

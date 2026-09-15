@@ -219,9 +219,10 @@ def test_assigned_supervisor_can_access_bus_image(
 
     from app.models.bus import Bus
     from app.models.enums import BusStatus, TripStatus
+    from app.models.pickup_point import PickupPoint
     from app.models.route import Route
-    from app.models.station import Station
     from app.models.trip import Trip
+    from app.models.trip_stop import TripStop
 
     ceo, _ = _create_user_and_token(db_session, "ceo_img_assigned@ra7al.edu", RoleEnum.CEO)
     sup, sup_token = _create_user_and_token(db_session, "sup_img_assigned@ra7al.edu", RoleEnum.SUPERVISOR)
@@ -233,25 +234,17 @@ def test_assigned_supervisor_can_access_bus_image(
         status=BusStatus.ACTIVE,
         image_url=None,
     )
-    s1 = Station(name="S1-I", code="ST-I1", latitude=30.0, longitude=31.0)
-    s2 = Station(name="S2-I", code="ST-I2", latitude=30.1, longitude=31.1)
-    db_session.add_all([bus, s1, s2])
+    db_session.add(bus)
     db_session.commit()
 
-    route = Route(
-        route_number="R-IMG",
-        name="Route Img",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=8.0,
-        estimated_duration_minutes=20,
-    )
+    route = Route(name="Route Img", is_active=True)
     db_session.add(route)
     db_session.commit()
 
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction="OUTBOUND",
         bus_id=bus.id,
         supervisor_id=sup.id,
         departure_time=now + timedelta(hours=1),
@@ -260,6 +253,19 @@ def test_assigned_supervisor_can_access_bus_image(
         status=TripStatus.SCHEDULED,
     )
     db_session.add(trip)
+    db_session.flush()
+
+    point = PickupPoint(route_id=route.id, name="Img Point", sequence=1)
+    db_session.add(point)
+    db_session.flush()
+    db_session.add(
+        TripStop(
+            trip_id=trip.id,
+            pickup_point_id=point.id,
+            stop_order=1,
+            departure_time=now + timedelta(hours=1),
+        )
+    )
     db_session.commit()
 
     # Give the bus an image via the API
@@ -313,12 +319,13 @@ def test_student_with_reservation_can_access_bus_image(
         SubscriptionStatus,
         TripStatus,
     )
+    from app.models.pickup_point import PickupPoint
     from app.models.reservation import Reservation
     from app.models.route import Route
-    from app.models.station import Station
     from app.models.subscription import Subscription
     from app.models.subscription_plan import SubscriptionPlan
     from app.models.trip import Trip
+    from app.models.trip_stop import TripStop
 
     ceo, ceo_token = _create_user_and_token(db_session, "ceo_img_yes@ra7al.edu", RoleEnum.CEO)
     student, student_token = _create_user_and_token(db_session, "stu_img_yes@ra7al.edu", RoleEnum.STUDENT)
@@ -329,19 +336,10 @@ def test_student_with_reservation_can_access_bus_image(
         capacity=40,
         status=BusStatus.ACTIVE,
     )
-    s1 = Station(name="S1-B", code="ST-B1", latitude=30.0, longitude=31.0)
-    s2 = Station(name="S2-B", code="ST-B2", latitude=30.1, longitude=31.1)
-    db_session.add_all([bus, s1, s2])
+    db_session.add(bus)
     db_session.commit()
 
-    route = Route(
-        route_number="R-IMG-B",
-        name="Route Img B",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=9.0,
-        estimated_duration_minutes=25,
-    )
+    route = Route(name="Route Img B", is_active=True)
     db_session.add(route)
     db_session.commit()
 
@@ -349,6 +347,7 @@ def test_student_with_reservation_can_access_bus_image(
     now = datetime.now(timezone.utc)
     trip = Trip(
         route_id=route.id,
+        direction="OUTBOUND",
         bus_id=bus.id,
         supervisor_id=supervisor.id,
         departure_time=now + timedelta(hours=3),
@@ -357,6 +356,19 @@ def test_student_with_reservation_can_access_bus_image(
         status=TripStatus.SCHEDULED,
     )
     db_session.add(trip)
+    db_session.flush()
+
+    point = PickupPoint(route_id=route.id, name="Img Book Point", sequence=1)
+    db_session.add(point)
+    db_session.flush()
+    db_session.add(
+        TripStop(
+            trip_id=trip.id,
+            pickup_point_id=point.id,
+            stop_order=1,
+            departure_time=now + timedelta(hours=3),
+        )
+    )
     db_session.commit()
 
     # The student needs an active subscription to hold a daily reservation.
@@ -392,6 +404,8 @@ def test_student_with_reservation_can_access_bus_image(
             student_id=student.id,
             subscription_id=subscription.id,
             service_date=trip.departure_time.date(),
+            direction="OUTBOUND",
+            selected_pickup_point_id=point.id,
             status=ReservationStatus.CONFIRMED,
         )
     )

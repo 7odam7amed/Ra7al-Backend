@@ -151,11 +151,13 @@ def test_subscription_creation_lifecycle_and_rules(sub_service) -> None:
     assert sub.duration_days_snapshot == 30
     assert sub.days_per_week_snapshot == 4
     assert sub.route_id is None
-    assert sub.outbound_pickup_point_id is None
-    assert sub.return_pickup_point_id is None
+    assert not hasattr(sub, "outbound_pickup_point_id")
+    assert not hasattr(sub, "return_pickup_point_id")
     assert sub.payment is not None
     assert sub.payment.amount == Decimal("750.00")
-    assert sub.payment.status == PaymentStatus.SUBMITTED
+    # Digital payments stay PENDING until the required receipt image is
+    # uploaded through the payments API.
+    assert sub.payment.status == PaymentStatus.PENDING
 
     # 2. Cannot access QR while PENDING
     with pytest.raises(ValidationError) as exc:

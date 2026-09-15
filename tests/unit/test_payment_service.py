@@ -48,7 +48,6 @@ def _create_mock_reservation(
     student_id: int,
     trip_id: int = 1,
     status: ReservationStatus = ReservationStatus.CONFIRMED,
-    fare_amount: Decimal = Decimal("50.00"),
     departure_time: datetime | None = None,
 ) -> Reservation:
     if departure_time is None:
@@ -62,7 +61,6 @@ def _create_mock_reservation(
         departure_time=departure_time,
         estimated_arrival_time=departure_time + timedelta(hours=1),
         passenger_capacity=30,
-        fare_amount=fare_amount,
         status=TripStatus.SCHEDULED,
     )
     res = Reservation(
@@ -105,7 +103,9 @@ def test_validate_student() -> None:
         service.validate_student(3)
 
 
-def test_create_payment_success() -> None:
+def test_create_payment_retired_flow() -> None:
+    """Reservation payments are retired: trips carry no fare, subscriptions
+    cover transportation, so create_payment always raises ValidationError."""
     payment_repo = MagicMock()
     res_repo = MagicMock()
     trip_repo = MagicMock()
@@ -115,37 +115,20 @@ def test_create_payment_success() -> None:
     student = _create_mock_user(1, RoleEnum.STUDENT)
     user_repo.get_by_id.return_value = student
 
-    reservation = _create_mock_reservation(
-        res_id=10, student_id=1, fare_amount=Decimal("60.00")
-    )
-    res_repo.get_by_id.return_value = reservation
-    payment_repo.get_active_for_reservation_for_update.return_value = None
-
-    expected_payment = Payment(
-        id=100,
-        reservation_id=10,
-        student_id=1,
-        amount=Decimal("60.00"),
-        currency="EGP",
-        method=PaymentMethod.VODAFONE_CASH,
-        status=PaymentStatus.SUBMITTED,
-        transaction_reference="VC-111",
-    )
-    payment_repo.create.return_value = expected_payment
-
-    res = service.create_payment(
-        student_id=1,
-        data=PaymentCreateRequest(
-            reservation_id=10,
-            method=PaymentMethod.VODAFONE_CASH,
-            transaction_reference="VC-111",
-        ),
-    )
-    assert res.id == 100
-    assert res.amount == Decimal("60.00")
+    with pytest.raises(ValidationError, match="Reservation payments are no longer used"):
+        service.create_payment(
+            student_id=1,
+            data=PaymentCreateRequest(
+                reservation_id=10,
+                method=PaymentMethod.VODAFONE_CASH,
+                transaction_reference="VC-111",
+            ),
+        )
+    payment_repo.create.assert_not_called()
 
 
-def test_create_payment_validations() -> None:
+def test_create_payment_validations_retired_flow() -> None:
+    """The retired flow rejects before any reservation-specific validation."""
     payment_repo = MagicMock()
     res_repo = MagicMock()
     trip_repo = MagicMock()
@@ -155,51 +138,19 @@ def test_create_payment_validations() -> None:
     student = _create_mock_user(1, RoleEnum.STUDENT)
     user_repo.get_by_id.return_value = student
 
-    # 1. Nonexistent reservation -> 404
+    # Even for a nonexistent reservation the retired-flow error wins.
     res_repo.get_by_id.return_value = None
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ValidationError, match="Reservation payments are no longer used"):
         service.create_payment(
             1, PaymentCreateRequest(reservation_id=99, method=PaymentMethod.CASH)
         )
 
-    # 2. Other student's reservation -> 403
-    other_res = _create_mock_reservation(res_id=10, student_id=2)
-    res_repo.get_by_id.return_value = other_res
+    # A non-student caller is rejected by student validation first.
+    supervisor = _create_mock_user(3, RoleEnum.SUPERVISOR)
+    user_repo.get_by_id.return_value = supervisor
     with pytest.raises(ForbiddenError):
         service.create_payment(
-            1, PaymentCreateRequest(reservation_id=10, method=PaymentMethod.CASH)
-        )
-
-    # 3. Cancelled reservation -> 422
-    cancelled_res = _create_mock_reservation(
-        res_id=11, student_id=1, status=ReservationStatus.CANCELLED
-    )
-    res_repo.get_by_id.return_value = cancelled_res
-    with pytest.raises(ValidationError, match="Cannot create payment for reservation with status"):
-        service.create_payment(
-            1, PaymentCreateRequest(reservation_id=11, method=PaymentMethod.CASH)
-        )
-
-    # 4. Departed trip -> 422
-    past_dep = datetime.now(timezone.utc) - timedelta(minutes=5)
-    departed_res = _create_mock_reservation(
-        res_id=12, student_id=1, departure_time=past_dep
-    )
-    res_repo.get_by_id.return_value = departed_res
-    with pytest.raises(ValidationError, match="already departed"):
-        service.create_payment(
-            1, PaymentCreateRequest(reservation_id=12, method=PaymentMethod.CASH)
-        )
-
-    # 5. Duplicate active payment -> 409
-    valid_res = _create_mock_reservation(res_id=13, student_id=1)
-    res_repo.get_by_id.return_value = valid_res
-    payment_repo.get_active_for_reservation_for_update.return_value = Payment(
-        id=1, reservation_id=13, student_id=1, status=PaymentStatus.PENDING
-    )
-    with pytest.raises(ConflictError, match="An active payment"):
-        service.create_payment(
-            1, PaymentCreateRequest(reservation_id=13, method=PaymentMethod.CASH)
+            3, PaymentCreateRequest(reservation_id=10, method=PaymentMethod.CASH)
         )
 
 
@@ -272,6 +223,8 @@ def test_verify_and_reject_payment_rules() -> None:
         amount=Decimal("50.00"),
         method=PaymentMethod.VODAFONE_CASH,
         status=PaymentStatus.SUBMITTED,
+        transaction_reference="VC-REF-001",
+        receipt_image_path="uploads/payment_receipts/receipt.png",
     )
     payment_repo.get_by_id.return_value = p_sub
 

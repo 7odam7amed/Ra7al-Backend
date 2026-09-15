@@ -59,19 +59,27 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
 ### FLOW B — Daily Transportation Selection (requires ACTIVE subscription)
 
 ```
-9. GET  /api/v1/reservations/available-trips          (any authenticated role)
-   ← TOMORROW's items[] with departure times, available_seats and each trip's
-     "pickup_points": [ { "id": 9, "name": "Cairo University Gate 3", "sequence": 1, ... } ]
-   → let the student pick a trip, then its outbound + return pickup points
+9. GET  /api/v1/reservations/upcoming-trips          (STUDENT)
+   ← ALL upcoming SCHEDULED trips (not only tomorrow): direction OUTBOUND/RETURN,
+     ordered "stops" with per-stop departure times, capacity, available_seats,
+     "booking_state": "AVAILABLE" | "BOOKED" | "FULL",
+     destination per direction (OUTBOUND → the student's university;
+     RETURN → null until a drop-off point is selected)
+   → let the student pick ONE OUTBOUND trip (selecting a pickup point from the
+     trip's stops) and/or ONE RETURN trip (selecting a drop-off point from its stops)
 10. POST /api/v1/reservations
    { "trip_id": 55,
-     "outbound_pickup_point_id": 9,        // ← an id from step 9's pickup_points
-     "return_pickup_point_id": 12,         // ← ditto
-     "direction_mode": "BOTH" }            // no "date" field: always TOMORROW
-   ← 201 { "id": 101, "service_date": "2026-09-15", "status": "CONFIRMED", ... }
-   // A pickup point from another trip/route → 422
-   // No active subscription → 422
-   // Change of mind: PUT /api/v1/reservations/my/tomorrow with the same body
+     "selected_pickup_point_id": 9,        // ← one of the trip's TripStops
+     "service_date": "2026-09-20" }        // optional; defaults to TOMORROW
+   ← 201 { "id": 101, "service_date": "2026-09-20", "direction": "OUTBOUND",
+           "status": "CONFIRMED", "origin": "Al-Mahatta",
+           "destination": "Assiut National University", ... }
+   // Max one OUTBOUND + one RETURN per student per service date (409 on a
+   // second same-direction booking); other direction stays bookable
+   // A point that is not one of the trip's stops → 422
+   // No ACTIVE subscription covering the service date → 422
+   // Trip FULL and allow_overbooking=false → 409
+   // Change of mind: PUT /api/v1/reservations/my/selection with the same body
 ```
 
 ### View Subscription & QR
@@ -84,9 +92,9 @@ CEO: PATCH /api/v1/users/{user_id}/approve            → PENDING → APPROVED
            "used_qr_usages": 0, "qr_usages_today": 0, ... }
 12. GET /api/v1/subscriptions/88/qr
    ← 200 { "qr_payload": "ra7al://subscription/Xk9fQ2s...", "valid_from": "2026-09-14",
-           "valid_until": "2026-09-20", "status": "ACTIVE", ... }
+           "valid_until": "2026-09-27", "status": "ACTIVE", ... }
    → render qr_payload as QR image (a QR alone is NOT enough to board —
-     the daily selection from step 10 is also required)
+     the daily reservation from step 10 is also required)
 ```
 
 ### Outbound Boarding (supervisor scans, real-time on the travel day)
@@ -151,12 +159,14 @@ Fleet & network setup:
 5. POST /api/v1/universities { "name": "Cairo University" }        (if needed)
 6. POST /api/v1/stations { "name": "Main Campus Gate", "code": "ST-CAMPUS-01",
                            "latitude": 30.0444, "longitude": 31.2357 }
-7. POST /api/v1/routes { "route_number": "R-101", "name": "Campus Express",
-                         "origin_station_id": 1, "destination_station_id": 2,
-                         "distance_km": 15.5, "estimated_duration_minutes": 35 }
-8. POST /api/v1/routes/10/stops { "station_id": 4, "stop_order": 1 }
-   POST /api/v1/routes/10/stops { "station_id": 5, "stop_order": 2 }
-   (or batch: PATCH /api/v1/routes/10/stops/reorder)
+   // Stations are standalone depot/landmark records (they keep coordinates);
+   // they are NOT linked to routes anymore
+7. POST /api/v1/routes { "name": "Route A" }
+   // A route is ONLY a named container of pickup points — no origin,
+   // destination, distance, duration, or supervisor
+8. POST /api/v1/routes/10/pickup-points { "name": "Al-Mahatta", "sequence": 1 }
+   POST /api/v1/routes/10/pickup-points { "name": "Al-Walidiyah", "sequence": 2 }
+   // PickupPoint belongs to exactly ONE route; no latitude/longitude
 
 Bus with image:
 9. POST /api/v1/buses   (multipart: bus_number, license_plate, capacity, image)
@@ -166,14 +176,18 @@ Bus with image:
 Supervisor & trip:
 10. POST /api/v1/users/supervisors { "full_name": "Sara Supervisor",
         "phone_number": "+201098765432", "password": "SuperSecret123!", "gender": "FEMALE" }
-11. POST /api/v1/trips { "route_id": 10, "bus_id": 3, "supervisor_id": 7,
-        "departure_time": "2026-09-15T07:30:00Z",
-        "estimated_arrival_time": "2026-09-15T08:05:00Z",
-        "pickup_points": [ { "name": "Cairo University Gate 3", "sequence": 1 } ] }
+11. GET  /api/v1/routes/10/pickup-points       → the route's points to select from
+12. POST /api/v1/trips
+    { "route_id": 10, "direction": "OUTBOUND", "bus_id": 3, "supervisor_id": 7,
+      "stops": [
+        { "pickup_point_id": 9,  "stop_order": 1, "departure_time": "2026-09-20T06:30:00Z" },
+        { "pickup_point_id": 10, "stop_order": 2, "departure_time": "2026-09-20T06:40:00Z" } ],
+      "passenger_capacity": 45, "allow_overbooking": false }
+    ← 201 TripResponse (departure_time = first stop time,
+       estimated_arrival_time = last stop time; no fare)
     // 409 here = bus or supervisor has an overlapping trip
-
-Plan with CEO-defined duration AND weekly usage-day allowance:
-12. POST /api/v1/subscription-plans
+    // 422 if a stop references a point from another route or duplicates onePlan with CEO-defined duration AND weekly usage-day allowance:
+13. POST /api/v1/subscription-plans
     { "name": "Weekly Standard", "plan_type": "WEEKLY", "duration_days": 7,
       "days_per_week": 4, "price": "120.00" }
     // duration_days is CEO-defined (1–730; DAILY fixed at 1)
@@ -181,12 +195,15 @@ Plan with CEO-defined duration AND weekly usage-day allowance:
     // e.g. WEEKLY+5, WEEKLY+12, MONTHLY+45, TERM+90 are all valid
 
 Payment verification (activates student subscriptions):
-13. GET  /api/v1/payments?status=SUBMITTED
-14. PATCH /api/v1/payments/{payment_id}/verify         → subscription PENDING → ACTIVE
+14. GET  /api/v1/payments?status=PENDING
+    // digital payments (VODAFONE_CASH/INSTAPAY) stay PENDING until the student
+    // uploads the receipt: POST /api/v1/payments/{id}/receipt (multipart image)
+    // upload sets status SUBMITTED + requires the transaction_reference
 
 Monitoring:
-15. GET /api/v1/boarding/records?student_id=42         (paginated, CEO only)
-16. GET /api/v1/subscriptions?status=ACTIVE&plan_type=WEEKLY
+16. GET /api/v1/boarding/records?student_id=42         (paginated, CEO only)
+17. GET /api/v1/subscriptions?status=ACTIVE&plan_type=WEEKLY
+18. GET /api/v1/trips/history                          → completed trips (RBAC-scoped)
 ```
 
 ---
@@ -204,12 +221,12 @@ Monitoring:
 5. GET  /api/v1/buses/3/image (blob)                  → display bus photo
    // Allowed: supervisor is assigned to a trip using this bus
 
-6. GET  /api/v1/trips/55/pickup-points                → scan form options
+6. GET  /api/v1/trips/55/stops                        → ordered stop sequence
 7. GET  /api/v1/boarding/trips/55/students            → roster (students who
-   selected this trip for its service date)
+   booked this trip for its service date)
    ← [ { "student_id": 42, "student_name": "Ahmed Ali", "subscription_id": 88,
-         "service_date": "2026-09-15", "direction_mode": "BOTH",
-         "outbound_pickup": "Cairo University Gate 3", "outbound_boarded": false,
+         "service_date": "2026-09-20", "direction": "OUTBOUND",
+         "selected_point": "Al-Mahatta", "outbound_boarded": false,
          "return_boarded": false, "payment_status": "VERIFIED", ... } ]
 
 8. POST /api/v1/boarding/scan   (per boarding; 60 scans/min limit)

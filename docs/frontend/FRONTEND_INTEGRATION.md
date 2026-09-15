@@ -121,7 +121,7 @@ busImage.src = URL.createObjectURL(img.data);
 ```js
 // Any authenticated user; students get read-only access (browsing the network)
 const routes = await api.get("/api/v1/routes", { params: { is_active: true, page: 1, page_size: 50 } });
-// routes.data.items[] → id, route_number, name, origin_station, destination_station, stops[]
+// routes.data.items[] → id, name, is_active, timestamps, pickup_points[] (each: id, name, address, sequence)
 ```
 
 > Routes are NOT part of subscription purchase. The subscription is plan + start date + payment only.

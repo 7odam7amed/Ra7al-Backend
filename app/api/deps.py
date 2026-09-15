@@ -17,13 +17,13 @@ from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
 from app.repositories.reservation_repository import ReservationRepository
 from app.repositories.route_repository import RouteRepository
-from app.repositories.route_stop_repository import RouteStopRepository
 from app.repositories.station_repository import StationRepository
 from app.repositories.subscription_plan_repository import (
     SubscriptionPlanRepository,
 )
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.repositories.trip_repository import TripRepository
+from app.repositories.trip_stop_repository import TripStopRepository
 from app.repositories.university_repository import UniversityRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
@@ -69,16 +69,14 @@ def get_route_repository(db: Session = Depends(get_db)) -> RouteRepository:
     return RouteRepository(db)
 
 
-def get_route_stop_repository(
-    db: Session = Depends(get_db),
-) -> RouteStopRepository:
-    """Dependency returning a RouteStopRepository instance."""
-    return RouteStopRepository(db)
-
-
 def get_trip_repository(db: Session = Depends(get_db)) -> TripRepository:
     """Dependency returning a TripRepository instance."""
     return TripRepository(db)
+
+
+def get_trip_stop_repository(db: Session = Depends(get_db)) -> TripStopRepository:
+    """Dependency returning a TripStopRepository instance."""
+    return TripStopRepository(db)
 
 
 def get_university_repository(
@@ -137,8 +135,6 @@ def get_auth_service(
     )
 
 
-
-
 def get_university_service(
     university_repo: UniversityRepository = Depends(get_university_repository),
 ) -> UniversityService:
@@ -148,11 +144,16 @@ def get_university_service(
 
 def get_pickup_point_service(
     pickup_point_repo: PickupPointRepository = Depends(get_pickup_point_repository),
-    trip_repo: TripRepository = Depends(get_trip_repository),
+    route_repo: RouteRepository = Depends(get_route_repository),
+    trip_stop_repo: TripStopRepository = Depends(get_trip_stop_repository),
+    reservation_repo: ReservationRepository = Depends(get_reservation_repository),
 ) -> PickupPointService:
     """Dependency returning a PickupPointService instance."""
     return PickupPointService(
-        pickup_point_repo=pickup_point_repo, trip_repo=trip_repo
+        pickup_point_repo=pickup_point_repo,
+        route_repo=route_repo,
+        trip_stop_repo=trip_stop_repo,
+        reservation_repo=reservation_repo,
     )
 
 
@@ -185,16 +186,16 @@ def get_station_service(
 
 def get_route_service(
     route_repo: RouteRepository = Depends(get_route_repository),
-    station_repo: StationRepository = Depends(get_station_repository),
-    user_repo: UserRepository = Depends(get_user_repository),
-    route_stop_repo: RouteStopRepository = Depends(get_route_stop_repository),
+    pickup_point_repo: PickupPointRepository = Depends(get_pickup_point_repository),
+    trip_stop_repo: TripStopRepository = Depends(get_trip_stop_repository),
+    reservation_repo: ReservationRepository = Depends(get_reservation_repository),
 ) -> RouteService:
     """Dependency returning a RouteService instance."""
     return RouteService(
         route_repo=route_repo,
-        station_repo=station_repo,
-        user_repo=user_repo,
-        route_stop_repo=route_stop_repo,
+        pickup_point_repo=pickup_point_repo,
+        trip_stop_repo=trip_stop_repo,
+        reservation_repo=reservation_repo,
     )
 
 
@@ -203,6 +204,7 @@ def get_trip_service(
     bus_repo: BusRepository = Depends(get_bus_repository),
     route_repo: RouteRepository = Depends(get_route_repository),
     user_repo: UserRepository = Depends(get_user_repository),
+    trip_stop_repo: TripStopRepository = Depends(get_trip_stop_repository),
     pickup_point_repo: PickupPointRepository = Depends(
         get_pickup_point_repository
     ),
@@ -213,6 +215,7 @@ def get_trip_service(
         bus_repo=bus_repo,
         route_repo=route_repo,
         user_repo=user_repo,
+        trip_stop_repo=trip_stop_repo,
         pickup_point_repo=pickup_point_repo,
     )
 
@@ -304,10 +307,6 @@ def get_boarding_service(
         pickup_point_repo=pickup_point_repo,
         reservation_repo=reservation_repo,
     )
-
-
-
-
 
 
 def get_current_user(

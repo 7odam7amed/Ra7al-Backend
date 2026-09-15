@@ -229,14 +229,12 @@ class SubscriptionService:
             status=SubscriptionStatus.PENDING,
         )
 
-        # 8. Create initial Payment record (price derived from the plan)
+        # 8. Create initial Payment record (price derived from the plan).
+        # Digital payments (VODAFONE_CASH / INSTAPAY) stay PENDING until the
+        # student uploads the REQUIRED receipt image via the payments API;
+        # uploading advances them to SUBMITTED for CEO/SUPervisor review.
         initial_payment_status = PaymentStatus.PENDING
         paid_at: datetime | None = None
-        now_utc = datetime.now(timezone.utc)
-
-        if data.payment_method in (PaymentMethod.VODAFONE_CASH, PaymentMethod.INSTAPAY):
-            initial_payment_status = PaymentStatus.SUBMITTED
-            paid_at = now_utc
 
         payment = self.payment_repo.create(
             student_id=student_id,

@@ -21,10 +21,10 @@ from app.models.enums import (
 from app.models.payment import Payment
 from app.models.pickup_point import PickupPoint
 from app.models.route import Route
-from app.models.station import Station
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
 from app.models.trip import Trip
+from app.models.trip_stop import TripStop
 from app.models.user import User
 
 
@@ -54,16 +54,7 @@ def _create_user_and_token(
 def _setup_transit_fixtures(
     session: Session,
 ) -> dict:
-    """Helper to seed stations, routes, buses, trips, pickup points, and canonical plans."""
-    s1 = Station(
-        name="Main Campus Station", code=f"MCS-{datetime.now().microsecond}", latitude=30.0, longitude=31.0, is_active=True
-    )
-    s2 = Station(
-        name="Downtown Station", code=f"DTS-{datetime.now().microsecond}", latitude=30.1, longitude=31.1, is_active=True
-    )
-    s3 = Station(
-        name="Uptown Station", code=f"UTS-{datetime.now().microsecond}", latitude=30.2, longitude=31.2, is_active=True
-    )
+    """Seed routes (containers of pickup points), buses, directed trips, and canonical plans."""
     bus1 = Bus(
         bus_number=f"BUS-SUB-{datetime.now().microsecond}-1",
         license_plate=f"PLT-SUB-{datetime.now().microsecond}-1",
@@ -76,27 +67,11 @@ def _setup_transit_fixtures(
         capacity=30,
         status=BusStatus.ACTIVE,
     )
-    session.add_all([s1, s2, s3, bus1, bus2])
+    session.add_all([bus1, bus2])
     session.flush()
 
-    route1 = Route(
-        name="Campus Express",
-        route_number=f"CE-{datetime.now().microsecond}",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=20.0,
-        estimated_duration_minutes=30,
-        is_active=True,
-    )
-    route2 = Route(
-        name="Uptown Shuttle",
-        route_number=f"US-{datetime.now().microsecond}",
-        origin_station_id=s1.id,
-        destination_station_id=s3.id,
-        distance_km=25.0,
-        estimated_duration_minutes=40,
-        is_active=True,
-    )
+    route1 = Route(name=f"Campus Express-{datetime.now().microsecond}", is_active=True)
+    route2 = Route(name=f"Uptown Shuttle-{datetime.now().microsecond}", is_active=True)
     session.add_all([route1, route2])
     session.flush()
 
@@ -136,6 +111,7 @@ def _setup_transit_fixtures(
     now_utc = datetime.now(timezone.utc)
     trip1 = Trip(
         route_id=route1.id,
+        direction="OUTBOUND",
         bus_id=bus1.id,
         supervisor_id=supervisor.id,
         departure_time=now_utc,
@@ -145,21 +121,42 @@ def _setup_transit_fixtures(
     )
     trip2 = Trip(
         route_id=route2.id,
+        direction="RETURN",
         bus_id=bus2.id,
         supervisor_id=supervisor.id,
-        departure_time=now_utc,
-        estimated_arrival_time=now_utc + timedelta(hours=1),
+        departure_time=now_utc + timedelta(hours=2),
+        estimated_arrival_time=now_utc + timedelta(hours=3),
         passenger_capacity=30,
         status=TripStatus.SCHEDULED,
     )
     session.add_all([trip1, trip2])
     session.flush()
 
-    p1_route1 = PickupPoint(trip_id=trip1.id, name="Route 1 Gate Out", sequence=1)
-    p2_route1 = PickupPoint(trip_id=trip1.id, name="Route 1 Gate Ret", sequence=2)
-    p1_route2 = PickupPoint(trip_id=trip2.id, name="Route 2 Stop Out", sequence=1)
-    p2_route2 = PickupPoint(trip_id=trip2.id, name="Route 2 Stop Ret", sequence=2)
+    p1_route1 = PickupPoint(route_id=route1.id, name="Route 1 Gate Out", sequence=1)
+    p2_route1 = PickupPoint(route_id=route1.id, name="Route 1 Gate Ret", sequence=2)
+    p1_route2 = PickupPoint(route_id=route2.id, name="Route 2 Stop Out", sequence=1)
+    p2_route2 = PickupPoint(route_id=route2.id, name="Route 2 Stop Ret", sequence=2)
     session.add_all([p1_route1, p2_route1, p1_route2, p2_route2])
+    session.flush()
+
+    for order, point in enumerate([p1_route1, p2_route1], start=1):
+        session.add(
+            TripStop(
+                trip_id=trip1.id,
+                pickup_point_id=point.id,
+                stop_order=order,
+                departure_time=now_utc + timedelta(minutes=15 * order),
+            )
+        )
+    for order, point in enumerate([p1_route2, p2_route2], start=1):
+        session.add(
+            TripStop(
+                trip_id=trip2.id,
+                pickup_point_id=point.id,
+                stop_order=order,
+                departure_time=now_utc + timedelta(hours=2, minutes=15 * order),
+            )
+        )
     session.commit()
 
     return {
@@ -376,7 +373,8 @@ def test_subscription_payment_lifecycle_unverified_to_active(
     student_headers = {"Authorization": f"Bearer {student_token}"}
 
     # 1. Create subscription with a digital payment reference (required upfront
-    #    for digital methods): the payment is born SUBMITTED, subscription PENDING.
+    #    for digital methods): the payment is born PENDING — the REQUIRED
+    #    receipt image has not been uploaded yet — subscription PENDING.
     today_str = datetime.now(timezone.utc).date().isoformat()
     payload = {
         "plan_id": fixtures["plan_monthly"].id,
@@ -394,11 +392,31 @@ def test_subscription_payment_lifecycle_unverified_to_active(
     res_qr = client_with_db.get(f"/api/v1/subscriptions/{sub_id}/qr", headers=student_headers)
     assert res_qr.status_code == 422
 
-    # 3. Payment is already SUBMITTED (reference provided at subscription time)
+    # 3. Payment is PENDING until the receipt image is uploaded
     res_pay_check = client_with_db.get(f"/api/v1/payments/{pay_id}", headers=student_headers)
     assert res_pay_check.status_code == 200
-    assert res_pay_check.json()["status"] == "SUBMITTED"
+    assert res_pay_check.json()["status"] == "PENDING"
     assert res_pay_check.json()["transaction_reference"] == "INSTA-TX-000111"
+
+    # Verification without a receipt is rejected.
+    res_verify_early = client_with_db.patch(
+        f"/api/v1/payments/{pay_id}/verify", headers=ceo_headers
+    )
+    assert res_verify_early.status_code == 422
+    assert "receipt" in res_verify_early.json()["detail"].lower()
+
+    # 3b. Student uploads the receipt -> payment advances to SUBMITTED.
+    receipt_png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4"
+    )
+    res_receipt = client_with_db.post(
+        f"/api/v1/payments/{pay_id}/receipt",
+        files={"image": ("receipt.png", receipt_png, "image/png")},
+        headers=student_headers,
+    )
+    assert res_receipt.status_code == 201, res_receipt.text
+    assert res_receipt.json()["status"] == "SUBMITTED"
+    assert res_receipt.json()["receipt_image_path"]
 
     # 4. CEO verifies payment -> Subscription activates automatically
     res_verify = client_with_db.patch(f"/api/v1/payments/{pay_id}/verify", headers=ceo_headers)
@@ -551,7 +569,6 @@ def test_subscription_creation_ignores_legacy_route_pickup_fields(
         "payment_method": "CASH",
         # Legacy fields — accepted-but-ignored by the API, never persisted:
         "route_id": fixtures["route1"].id,
-        "outbound_pickup_point_id": fixtures["p1_route1"].id,
         "return_pickup_mode": "SAME_AS_OUTBOUND",
     }
     res = client_with_db.post("/api/v1/subscriptions", json=payload, headers=headers)

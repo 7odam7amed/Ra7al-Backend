@@ -60,17 +60,16 @@ class BoardingResponse(BaseModel):
 
 
 class SupervisorTripStudentResponse(BaseModel):
-    """Summary of a student's daily selection for a supervisor's assigned trip."""
+    """Summary of a student's directed booking for a supervisor's assigned trip."""
 
     student_id: int
     student_name: str
     subscription_id: int
     subscription_status: SubscriptionStatus
     service_date: date
-    direction_mode: str = "BOTH"
+    direction: str = "OUTBOUND"
+    selected_point: str | None = None
     payment_status: PaymentStatus | None = None
-    outbound_pickup: str | None = None
-    return_pickup: str | None = None
     outbound_boarded: bool = False
     return_boarded: bool = False
     last_boarded_at: datetime | None = None

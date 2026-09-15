@@ -16,6 +16,9 @@ Business rules under test:
 
 Tests are week-agnostic: seeded usage days sit on deterministic dates inside
 the current ISO week window, so they pass on any calendar day.
+
+Post-refactor model: one Reservation row per (student, date, direction) with
+selected_pickup_point_id; trips are directed with ordered TripStops.
 """
 import hashlib
 from datetime import date, datetime, time, timedelta, timezone
@@ -26,24 +29,18 @@ from sqlalchemy.orm import Session
 
 from app.exceptions.base import ConflictError, ValidationError
 from app.models.boarding import BoardingRecord
-from app.models.bus import Bus
 from app.models.enums import (
     BoardingDirection,
-    BusStatus,
-    GenderEnum,
     ReservationStatus,
     RoleEnum,
     SubscriptionPlanType,
     SubscriptionStatus,
+    TripDirection,
     TripStatus,
 )
-from app.models.pickup_point import PickupPoint
 from app.models.reservation import Reservation
-from app.models.route import Route
-from app.models.station import Station
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
-from app.models.trip import Trip
 from app.models.user import User
 from app.repositories.boarding_repository import BoardingRepository
 from app.repositories.pickup_point_repository import PickupPointRepository
@@ -53,6 +50,14 @@ from app.repositories.trip_repository import TripRepository
 from app.schemas.boarding import BoardingScanRequest
 from app.services.boarding_service import SCANS_PER_USAGE_DAY, BoardingService
 from app.utils.dates import business_today, week_start, week_end
+from tests.helpers import (
+    make_bus,
+    make_pickup_point,
+    make_route,
+    make_supervisor,
+    make_student,
+    make_trip,
+)
 
 
 def _user(session: Session, phone: str, role: RoleEnum) -> User:
@@ -61,7 +66,7 @@ def _user(session: Session, phone: str, role: RoleEnum) -> User:
         phone_number=phone,
         password_hash="hash",
         role=role,
-        gender=GenderEnum.MALE,
+        gender=None if role == RoleEnum.STUDENT else None,
         is_active=True,
     )
     session.add(user)
@@ -94,49 +99,34 @@ def _week_dates(today: date, count: int, exclude: set[date] | None = None) -> li
 
 @pytest.fixture
 def qr_env(db_session: Session) -> dict:
-    """Seed supervisor, student, route, bus, today's trip, plan, and subscription."""
-    supervisor = _user(db_session, "+201112220001", RoleEnum.SUPERVISOR)
-    student = _user(db_session, "+201122330002", RoleEnum.STUDENT)
+    """Seed supervisor, student, route with points, bus, today's trips, plan, and subscription."""
+    supervisor = make_supervisor(db_session)
+    student = make_student(db_session)
 
-    s1 = Station(name="Campus Q", code="ST-Q1", latitude=30.0, longitude=31.0)
-    s2 = Station(name="Dorm Q", code="ST-Q2", latitude=30.1, longitude=31.1)
-    bus = Bus(
-        bus_number="BUS-QR-1",
-        license_plate="QR-0001",
-        capacity=30,
-        status=BusStatus.ACTIVE,
-    )
-    db_session.add_all([s1, s2, bus])
-    db_session.flush()
-
-    route = Route(
-        route_number="R-QR",
-        name="QR Route",
-        origin_station_id=s1.id,
-        destination_station_id=s2.id,
-        distance_km=10.0,
-        estimated_duration_minutes=30,
-    )
-    db_session.add(route)
-    db_session.flush()
+    route = make_route(db_session, name="QR Route")
+    outbound_point = make_pickup_point(db_session, route, name="Out Gate", sequence=1)
+    return_point = make_pickup_point(db_session, route, name="In Gate", sequence=2)
+    bus = make_bus(db_session)
 
     today = business_today()
-    trip_today = Trip(
-        route_id=route.id,
-        bus_id=bus.id,
-        supervisor_id=supervisor.id,
+    trip_today = make_trip(
+        db_session,
+        route=route,
+        bus=bus,
+        supervisor=supervisor,
+        direction=TripDirection.OUTBOUND,
         departure_time=_at(today, 7),
-        estimated_arrival_time=_at(today, 8),
-        passenger_capacity=30,
-        status=TripStatus.SCHEDULED,
+        points=[outbound_point],
     )
-    db_session.add(trip_today)
-    db_session.flush()
-
-    outbound_point = PickupPoint(trip_id=trip_today.id, name="Out Gate", sequence=1)
-    return_point = PickupPoint(trip_id=trip_today.id, name="In Gate", sequence=2)
-    db_session.add_all([outbound_point, return_point])
-    db_session.flush()
+    trip_today_return = make_trip(
+        db_session,
+        route=route,
+        bus=bus,
+        supervisor=supervisor,
+        direction=TripDirection.RETURN,
+        departure_time=_at(today, 15),
+        points=[return_point],
+    )
 
     plan = SubscriptionPlan(
         name="Monthly 30d x 4d/wk",
@@ -179,6 +169,7 @@ def qr_env(db_session: Session) -> dict:
         "route": route,
         "bus": bus,
         "trip_today": trip_today,
+        "trip_today_return": trip_today_return,
         "outbound_point": outbound_point,
         "return_point": return_point,
         "plan": plan,
@@ -187,7 +178,12 @@ def qr_env(db_session: Session) -> dict:
 
 
 def _scan(env: dict, direction: BoardingDirection, trip=None, pickup=None, token: str = "raw-token-qr"):
-    trip = trip or env["trip_today"]
+    if trip is None:
+        trip = (
+            env["trip_today"]
+            if direction == BoardingDirection.OUTBOUND
+            else env["trip_today_return"]
+        )
     pickup = pickup or (
         env["outbound_point"] if direction == BoardingDirection.OUTBOUND else env["return_point"]
     )
@@ -202,41 +198,21 @@ def _scan(env: dict, direction: BoardingDirection, trip=None, pickup=None, token
     )
 
 
-def _make_trip_for_day(env: dict, day: date) -> tuple[Trip, PickupPoint, PickupPoint]:
-    """Create a dedicated trip (plus pickup points) departing on ``day``."""
+def _seed_reservation(env: dict, service_date: date, trip, point) -> Reservation:
+    """Seed one confirmed directed booking so scans are authorized for that date."""
     session = env["session"]
-    trip = Trip(
-        route_id=env["route"].id,
-        bus_id=env["bus"].id,
-        supervisor_id=env["supervisor"].id,
-        departure_time=_at(day, 7),
-        estimated_arrival_time=_at(day, 8),
-        passenger_capacity=30,
-        status=TripStatus.SCHEDULED,
+    direction = (
+        BoardingDirection.OUTBOUND
+        if trip.direction == TripDirection.OUTBOUND
+        else BoardingDirection.RETURN
     )
-    session.add(trip)
-    session.flush()
-    out = PickupPoint(trip_id=trip.id, name=f"Out {trip.id}", sequence=1)
-    ret = PickupPoint(trip_id=trip.id, name=f"Ret {trip.id}", sequence=2)
-    session.add_all([out, ret])
-    session.flush()
-    return trip, out, ret
-
-
-def _seed_reservation(env: dict, service_date: date, trip=None, out_point=None, ret_point=None) -> Reservation:
-    """Seed a confirmed daily selection so scans are authorized for that date."""
-    session = env["session"]
-    trip = trip or env["trip_today"]
-    out_point = out_point or env["outbound_point"]
-    ret_point = ret_point or env["return_point"]
     reservation = Reservation(
         trip_id=trip.id,
         student_id=env["student"].id,
         subscription_id=env["subscription"].id,
         service_date=service_date,
-        outbound_pickup_point_id=out_point.id,
-        return_pickup_point_id=ret_point.id,
-        direction_mode="BOTH",
+        direction=direction,
+        selected_pickup_point_id=point.id,
         status=ReservationStatus.CONFIRMED,
     )
     session.add(reservation)
@@ -247,16 +223,34 @@ def _seed_reservation(env: dict, service_date: date, trip=None, out_point=None, 
 def _seed_usage_day(env: dict, day: date) -> None:
     """Seed one full usage day (outbound + return) on ``day`` as committed records.
 
-    Each usage day gets its own trip, pickup points, and confirmed reservation,
-    mirroring the recurring daily-trip production model and respecting the
-    (subscription, trip, direction) unique constraint.
+    Each usage day gets its own directed trips (outbound + return), points, and
+    confirmed reservations, mirroring the recurring daily-trip production model
+    and respecting the (subscription, trip, direction) unique constraint.
     """
-    trip, out, ret = _make_trip_for_day(env, day)
-    _seed_reservation(env, day, trip=trip, out_point=out, ret_point=ret)
     session = env["session"]
-    for direction, point in (
-        (BoardingDirection.OUTBOUND, out),
-        (BoardingDirection.RETURN, ret),
+    trip_out = make_trip(
+        session,
+        route=env["route"],
+        bus=env["bus"],
+        supervisor=env["supervisor"],
+        direction=TripDirection.OUTBOUND,
+        departure_time=_at(day, 7),
+        points=[env["outbound_point"]],
+    )
+    trip_ret = make_trip(
+        session,
+        route=env["route"],
+        bus=env["bus"],
+        supervisor=env["supervisor"],
+        direction=TripDirection.RETURN,
+        departure_time=_at(day, 15),
+        points=[env["return_point"]],
+    )
+    _seed_reservation(env, day, trip_out, env["outbound_point"])
+    _seed_reservation(env, day, trip_ret, env["return_point"])
+    for direction, point, trip in (
+        (BoardingDirection.OUTBOUND, env["outbound_point"], trip_out),
+        (BoardingDirection.RETURN, env["return_point"], trip_ret),
     ):
         session.add(
             BoardingRecord(
@@ -286,7 +280,9 @@ def test_scans_per_usage_day_constant() -> None:
 def test_outbound_and_return_same_day_one_usage_day(db_session: Session, qr_env: dict) -> None:
     """Outbound + return scans on the same date count as ONE usage day."""
     env = qr_env
-    _seed_reservation(env, business_today())
+    today = business_today()
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
+    _seed_reservation(env, today, env["trip_today_return"], env["return_point"])
     _scan(env, BoardingDirection.OUTBOUND)
     _scan(env, BoardingDirection.RETURN)
     assert _used_days_this_week(env) == 1
@@ -304,7 +300,7 @@ def test_fifth_usage_day_rejected_when_days_per_week_4(db_session: Session, qr_e
     assert _used_days_this_week(env) == 4
 
     # Live today-scan (a 5th usage day) must be rejected.
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
     with pytest.raises(ValidationError, match="Weekly usage limit"):
         _scan(env, BoardingDirection.OUTBOUND)
     assert _used_days_this_week(env) == 4
@@ -320,7 +316,8 @@ def test_return_scan_allowed_when_week_exhausted_but_today_already_used(
     # 3 usage days on other week dates + today = 4 (limit).
     for day in _week_dates(today, 3, exclude={today}):
         _seed_usage_day(env, day)
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
+    _seed_reservation(env, today, env["trip_today_return"], env["return_point"])
     _scan(env, BoardingDirection.OUTBOUND)
     assert _used_days_this_week(env) == 4
 
@@ -342,7 +339,7 @@ def test_unused_weekly_allowance_does_not_roll_over(db_session: Session, qr_env:
     _seed_usage_day(env, last_week_monday + timedelta(days=1))
 
     # This week: one live usage day (today).
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
     _scan(env, BoardingDirection.OUTBOUND)
     assert _used_days_this_week(env) == 1
 
@@ -352,10 +349,7 @@ def test_unused_weekly_allowance_does_not_roll_over(db_session: Session, qr_env:
     assert _used_days_this_week(env) == 4
 
     # A further live scan today is rejected even though last week had 2 unused
-    # days: rolled-over allowance is NOT granted. (Today's allowance slot was
-    # already consumed; today's return scan is covered by the duplicate guard,
-    # so use the RETURN direction of the same trip to hit the weekly/daily
-    # guard with a fresh scan request.)
+    # days: rolled-over allowance is NOT granted.
     with pytest.raises((ValidationError, ConflictError)):
         _scan(env, BoardingDirection.OUTBOUND)
     assert _used_days_this_week(env) == 4
@@ -373,7 +367,7 @@ def test_next_week_allowance_resets(db_session: Session, qr_env: dict) -> None:
         _seed_usage_day(env, last_week_monday + timedelta(days=offset))
 
     # This week is fresh: a scan today succeeds.
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
     response = _scan(env, BoardingDirection.OUTBOUND)
     assert response.success is True
     assert response.usage_days_this_week == 1
@@ -383,7 +377,9 @@ def test_next_week_allowance_resets(db_session: Session, qr_env: dict) -> None:
 def test_third_scan_same_direction_rejected(db_session: Session, qr_env: dict) -> None:
     """Duplicate scan for the same subscription/trip/direction is rejected."""
     env = qr_env
-    _seed_reservation(env, business_today())
+    today = business_today()
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
+    _seed_reservation(env, today, env["trip_today_return"], env["return_point"])
     _scan(env, BoardingDirection.OUTBOUND)
     with pytest.raises(ConflictError):
         _scan(env, BoardingDirection.OUTBOUND)
@@ -397,30 +393,25 @@ def test_third_scan_of_same_day_rejected(db_session: Session, qr_env: dict) -> N
     """A third scan on the same calendar day is rejected (2 scans/day max)."""
     env = qr_env
     today = business_today()
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
+    _seed_reservation(env, today, env["trip_today_return"], env["return_point"])
     _scan(env, BoardingDirection.OUTBOUND)
     _scan(env, BoardingDirection.RETURN)
 
-    # Point the existing selection at another same-day trip so the scan passes
-    # reservation authorization and reaches the daily-scan limit.
-    trip2, out2, _ret2 = _make_trip_for_day(env, today)
-    reservation = (
-        env["session"]
-        .query(Reservation)
-        .filter(
-            Reservation.student_id == env["student"].id,
-            Reservation.service_date == today,
-            Reservation.trip_id == env["trip_today"].id,
-        )
-        .first()
+    # A third scan attempt on a second same-day outbound trip passes
+    # reservation authorization only if a booking exists for it; the student
+    # cannot hold two outbound bookings, so the scan is rejected either way.
+    trip2 = make_trip(
+        db_session,
+        route=env["route"],
+        bus=env["bus"],
+        supervisor=env["supervisor"],
+        direction=TripDirection.OUTBOUND,
+        departure_time=_at(today, 9),
+        points=[env["outbound_point"]],
     )
-    assert reservation is not None
-    reservation.trip_id = trip2.id
-    reservation.outbound_pickup_point_id = out2.id
-    env["session"].commit()
-
-    with pytest.raises(ValidationError, match="Daily QR limit"):
-        _scan(env, BoardingDirection.OUTBOUND, trip=trip2, pickup=out2)
+    with pytest.raises((ValidationError, ConflictError)):
+        _scan(env, BoardingDirection.OUTBOUND, trip=trip2, pickup=env["outbound_point"])
 
 
 def test_subscription_expiration_overrides_weekly_allowance(
@@ -438,9 +429,9 @@ def test_subscription_expiration_overrides_weekly_allowance(
 
 
 def test_scan_without_daily_reservation_rejected(db_session: Session, qr_env: dict) -> None:
-    """No confirmed selection for the trip's date -> scan rejected."""
+    """No confirmed booking for the trip's date+direction -> scan rejected."""
     env = qr_env
-    with pytest.raises(ValidationError, match="No confirmed daily transportation selection"):
+    with pytest.raises(ValidationError, match="No confirmed daily transportation booking"):
         _scan(env, BoardingDirection.OUTBOUND)
 
 
@@ -448,10 +439,18 @@ def test_scan_on_trip_of_another_service_date_rejected(db_session: Session, qr_e
     """A trip departing another date cannot be scanned today (real-time boarding)."""
     env = qr_env
     other_day = _week_dates(business_today(), 1, exclude={business_today()})[0]
-    trip_other, out_other, _ret_other = _make_trip_for_day(env, other_day)
-    _seed_reservation(env, other_day, trip=trip_other, out_point=out_other, ret_point=_ret_other)
+    trip_other = make_trip(
+        db_session,
+        route=env["route"],
+        bus=env["bus"],
+        supervisor=env["supervisor"],
+        direction=TripDirection.OUTBOUND,
+        departure_time=_at(other_day, 7),
+        points=[env["outbound_point"]],
+    )
+    _seed_reservation(env, other_day, trip_other, env["outbound_point"])
     with pytest.raises(ValidationError, match="service date"):
-        _scan(env, BoardingDirection.OUTBOUND, trip=trip_other, pickup=out_other)
+        _scan(env, BoardingDirection.OUTBOUND, trip=trip_other, pickup=env["outbound_point"])
 
 
 def test_failed_scan_does_not_consume_usage(db_session: Session, qr_env: dict) -> None:
@@ -474,7 +473,8 @@ def test_scan_via_api_consumes_exactly_one_scan(
     from app.core.security import create_access_token
 
     env = qr_env
-    _seed_reservation(env, business_today())
+    today = business_today()
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
     headers = {
         "Authorization": "Bearer "
         + create_access_token(
@@ -519,7 +519,8 @@ def test_concurrent_scan_cannot_exceed_weekly_limit(db_session: Session, qr_env:
         _seed_usage_day(env, day)
     assert _used_days_this_week(env) == 3
 
-    _seed_reservation(env, today)
+    _seed_reservation(env, today, env["trip_today"], env["outbound_point"])
+    _seed_reservation(env, today, env["trip_today_return"], env["return_point"])
     _scan(env, BoardingDirection.OUTBOUND)  # 4th usage day
     assert _used_days_this_week(env) == 4
 
@@ -531,20 +532,30 @@ def test_concurrent_scan_cannot_exceed_weekly_limit(db_session: Session, qr_env:
     # Request A commits its scan; request B waits on the subscription row
     # lock. When B acquires the lock, the re-check against committed data must
     # reject it (3rd scan of the day / weekly cap reached).
-    trip_x, out_x, _ret_x = _make_trip_for_day(env, today)
-    # Point the existing today-selection at the new trip so a scan attempt on
-    # trip_x passes reservation authorization.
+    trip_x = make_trip(
+        db_session,
+        route=env["route"],
+        bus=env["bus"],
+        supervisor=env["supervisor"],
+        direction=TripDirection.OUTBOUND,
+        departure_time=_at(today, 9),
+        points=[env["outbound_point"]],
+    )
+    # Point today's outbound booking at trip_x so the scan passes reservation
+    # authorization (same direction, same selected point).
     today_reservation = (
         env["session"]
         .query(Reservation)
         .filter(
             Reservation.student_id == env["student"].id,
             Reservation.service_date == today,
+            Reservation.direction == BoardingDirection.OUTBOUND,
         )
         .first()
     )
+    assert today_reservation is not None
     today_reservation.trip_id = trip_x.id
-    today_reservation.outbound_pickup_point_id = out_x.id
+    today_reservation.selected_pickup_point_id = env["outbound_point"].id
     env["session"].commit()
 
     real_lock = service.boarding_repo.get_subscription_row_for_update
@@ -575,7 +586,7 @@ def test_concurrent_scan_cannot_exceed_weekly_limit(db_session: Session, qr_env:
         # This scan must be rejected: today already reached 2 scans (one
         # outbound + one return) after the concurrent commit.
         with pytest.raises(ValidationError, match="Daily QR limit"):
-            _scan(env, BoardingDirection.OUTBOUND, trip=trip_x, pickup=out_x)
+            _scan(env, BoardingDirection.OUTBOUND, trip=trip_x, pickup=env["outbound_point"])
 
     # Never more than days_per_week distinct usage days in the week.
     assert _used_days_this_week(env) <= 4

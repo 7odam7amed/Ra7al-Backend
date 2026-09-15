@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # Private bucket for bus images. Kept separate from the ID-card bucket so
     # namespace-scoped objects never mix (production bucket: bus-images).
     SUPABASE_BUS_IMAGES_BUCKET: str = "bus-images"
+    # Private bucket for digital payment receipt images (production bucket:
+    # payment-receipts). Receipts are only served through authorized backend
+    # endpoints using signed URLs — never exposed publicly.
+    SUPABASE_PAYMENT_RECEIPTS_BUCKET: str = "payment-receipts"
 
     # Trusted Proxies (for secure client IP extraction)
     TRUSTED_PROXIES: Annotated[

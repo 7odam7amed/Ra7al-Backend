@@ -48,6 +48,15 @@ class PaymentSubmitRequest(BaseModel):
     )
 
 
+class PaymentReceiptResponse(BaseModel):
+    """Result of attaching a payment receipt image to a payment."""
+
+    payment_id: int
+    receipt_image_path: str
+    status: PaymentStatus
+    message: str = "Payment receipt uploaded successfully"
+
+
 class PaymentRejectRequest(BaseModel):
     """Schema for rejecting a payment attempt."""
 
@@ -74,6 +83,9 @@ class PaymentResponse(BaseModel):
     status: PaymentStatus
     transaction_reference: str | None = None
     notes: str | None = None
+    # Object reference of the receipt image in the PRIVATE payment-receipts
+    # storage namespace (required for digital payments before verification).
+    receipt_image_path: str | None = None
     paid_at: datetime | None = None
     verified_at: datetime | None = None
     verified_by: int | None = None

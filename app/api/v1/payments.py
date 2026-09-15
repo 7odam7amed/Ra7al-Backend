@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, UploadFile, status
+from fastapi.responses import Response
 
 from app.api.deps import (
     CEO_OR_SUPERVISOR,
@@ -13,6 +14,7 @@ from app.models.user import User
 from app.schemas.payment import (
     PaginatedPaymentResponse,
     PaymentCreateRequest,
+    PaymentReceiptResponse,
     PaymentRejectRequest,
     PaymentResponse,
     PaymentSubmitRequest,
@@ -40,6 +42,57 @@ def create_payment(
     )
     return PaymentResponse.model_validate(payment)
 
+
+@payments_router.post(
+    "/{payment_id}/receipt",
+    response_model=PaymentReceiptResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a payment receipt image (Student owner only)",
+)
+async def upload_payment_receipt(
+    payment_id: int,
+    image: UploadFile,
+    current_user: User = Depends(STUDENT_ONLY),
+    payment_service: PaymentService = Depends(get_payment_service),
+) -> PaymentReceiptResponse:
+    """Attach the required receipt image to a digital payment request.
+
+    Digital payments require BOTH a transaction/reference code and a receipt
+    image before verification. The image is stored in the PRIVATE
+    payment-receipts bucket and is only reachable through authorized backend
+    endpoints.
+    """
+    payment = payment_service.upload_receipt(
+        payment_id=payment_id,
+        current_user=current_user,
+        file=image,
+    )
+    return PaymentReceiptResponse(
+        payment_id=payment.id,
+        receipt_image_path=payment.receipt_image_path or "",
+        status=payment.status,
+    )
+
+
+@payments_router.get(
+    "/{payment_id}/receipt",
+    summary="View a payment receipt image (owner student, or CEO & Supervisor for review)",
+)
+def get_payment_receipt(
+    payment_id: int,
+    current_user: User = Depends(get_current_user),
+    payment_service: PaymentService = Depends(get_payment_service),
+) -> Response:
+    """Stream a stored receipt image through an authorized backend flow.
+
+    Receipt objects live in a private bucket and are never exposed as public
+    URLs; access is re-checked on every request.
+    """
+    content, media_type = payment_service.get_receipt(
+        payment_id=payment_id,
+        current_user=current_user,
+    )
+    return Response(content=content, media_type=media_type)
 
 @payments_router.get(
     "/my",
