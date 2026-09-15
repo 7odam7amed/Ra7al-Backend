@@ -21,7 +21,7 @@ Business refactor:
 No destructive data loss: legacy values are preserved, backfills are
 derived from existing data only.
 
-Revision ID: 015_decouple_subscription_selection
+Revision ID: 015_subscription_selection
 Revises: 014_bus_image_flexible_plans
 Create Date: 2026-09-14
 """
@@ -31,7 +31,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "015_decouple_subscription_selection"
+revision: str = "015_subscription_selection"
 down_revision: Union[str, None] = "014_bus_image_flexible_plans"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

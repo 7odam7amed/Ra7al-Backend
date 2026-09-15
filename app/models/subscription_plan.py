@@ -29,12 +29,9 @@ class SubscriptionPlan(BaseModel):
             f"duration_days <= {MAX_PLAN_DURATION_DAYS}",
             name="chk_subscription_plan_duration_max",
         ),
-        # DAILY is fixed to 1 day; WEEKLY/MONTHLY/TERM durations are CEO-defined.
-        CheckConstraint(
-            "(plan_type = 'DAILY' AND duration_days = 1) OR "
-            "(plan_type IN ('WEEKLY', 'MONTHLY', 'TERM'))",
-            name="chk_subscription_plan_canonical_duration",
-        ),
+        # DAILY is flexible: duration_days is CEO-defined for every plan type
+        # (no plan-type pins duration; bounds are enforced by the constraints
+        # above and by the schema/service layers).
         CheckConstraint(
             "days_per_week > 0",
             name="chk_subscription_plan_days_per_week_positive",

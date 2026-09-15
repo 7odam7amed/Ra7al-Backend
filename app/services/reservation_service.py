@@ -14,22 +14,28 @@ from app.repositories.subscription_repository import SubscriptionRepository
 from app.repositories.trip_repository import TripRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.reservation import ReservationCreateRequest
-from app.utils.dates import business_today
+from app.utils.dates import business_today, week_window
 
 
 class ReservationService:
-    """Service for DAILY transportation selection (trip + pickup points for tomorrow).
+    """Service for DAILY transportation selection (trip + pickup points per service date).
 
     Business rules enforced here:
       - The student must own a valid subscription (ACTIVE, within validity
-        window, not cancelled/expired/rejected) — checked server-side, never
-        trusted from the request.
-      - Selections are for TOMORROW only (Today -> Tomorrow window). The
-        service date is derived server-side; clients cannot pick arbitrary
-        historical or future dates.
+        window, not cancelled/expired/rejected) that COVERS the requested
+        service date — checked server-side, never trusted from the request.
+      - The service date comes from the request (optional; defaults to
+        TOMORROW) and must be today or later. Each explicit selection creates
+        one reservation: DAILY subscriptions are flexible — transportation is
+        never booked automatically for every day of the validity window.
       - The trip must exist, be SCHEDULED, and depart on the service date.
       - Both pickup points must belong to the selected trip (and therefore to
         the trip's route). Cross-route pickup points are rejected.
+      - Weekly usage limit: at most ``days_per_week_snapshot`` DISTINCT usage
+        days per calendar week (Mon-Sun, UTC) per subscription. Each CONFIRMED
+        reservation is one usage day; the limit is re-checked under a row lock
+        so concurrent bookings cannot bypass it. Reservations from other
+        subscriptions never count.
     """
 
     def __init__(
@@ -72,6 +78,49 @@ class ReservationService:
             )
         return subscription
 
+    def _resolve_service_date(self, requested: date | None) -> date:
+        """Resolve the service date from the request.
+
+        None -> TOMORROW (backward-compatible default). Any supplied date in
+        the past (before the business 'today') is rejected; future dates are
+        accepted and validated against subscription coverage and the weekly
+        usage limit by the caller.
+        """
+        if requested is None:
+            return business_today() + timedelta(days=1)
+        if requested < business_today():
+            raise ValidationError(
+                "service_date cannot be in the past; transportation must be selected for today or a future date"
+            )
+        return requested
+
+    def _enforce_weekly_usage_limit(self, subscription, service_date: date) -> None:
+        """Enforce the subscription's weekly usage-day limit (Mon-Sun, UTC).
+
+        Counts the subscription's own CONFIRMED reservations inside the
+        calendar week (Mon-Sun) containing ``service_date`` — reservations
+        from other subscriptions never count. The subscription row is locked
+        FOR UPDATE first and the count re-checked after acquiring the lock,
+        so two concurrent bookings cannot both pass the limit. Unused weekly
+        allowance does NOT roll over (each week starts fresh).
+        """
+        locked = self.reservation_repo.get_subscription_row_for_update(subscription.id)
+        if locked is None:
+            raise NotFoundError("Subscription not found")
+
+        week_start, week_end = week_window(service_date)
+        used_days = self.reservation_repo.count_confirmed_for_subscription_in_window(
+            locked.id, week_start, week_end
+        )
+        days_per_week = locked.days_per_week_snapshot
+        if used_days >= days_per_week:
+            raise ConflictError(
+                f"Weekly transportation usage limit reached: the subscription allows "
+                f"at most {days_per_week} usage day(s) per week and {used_days} of them "
+                f"have already been selected for the week of {week_start.isoformat()}. "
+                f"Unused weekly allowance does not roll over."
+            )
+
     def _validate_trip_for_date(self, trip_id: int, service_date: date):
         """Lock the trip row and verify it exists, is scheduled, and departs on the service date."""
         trip = self.reservation_repo.get_trip_for_update(trip_id)
@@ -112,15 +161,21 @@ class ReservationService:
         student_id: int,
         data: ReservationCreateRequest,
     ) -> Reservation:
-        """Create the student's daily transportation selection for TOMORROW."""
-        # 0. Resolve the service date server-side: TOMORROW only. Clients
-        #    cannot submit arbitrary historical or future dates.
-        service_date = business_today() + timedelta(days=1)
+        """Create the student's daily transportation selection for the requested date.
+
+        The service date defaults to TOMORROW when the request omits it.
+        DAILY subscriptions are flexible: the student explicitly selects each
+        transportation date, subject to subscription coverage and the weekly
+        usage-day limit.
+        """
+        # 0. Resolve the service date server-side (request value or TOMORROW);
+        #    past dates are rejected here.
+        service_date = self._resolve_service_date(data.service_date)
 
         # 1. Validate student
         self.validate_student(student_id)
 
-        # 2. A valid ACTIVE subscription is mandatory.
+        # 2. A valid ACTIVE subscription covering the requested date is mandatory.
         subscription = self._get_valid_subscription(student_id, service_date)
 
         # 3. Lock trip and validate existence, status, and service date.
@@ -144,12 +199,17 @@ class ReservationService:
                 "cancel it before creating a new one"
             )
 
-        # 6. Capacity check.
+        # 6. Weekly usage-day limit (days_per_week_snapshot, Mon-Sun, UTC).
+        #    Checked after the duplicate guard so replacing a same-day selection
+        #    is never blocked; runs under a row lock for concurrency safety.
+        self._enforce_weekly_usage_limit(subscription, service_date)
+
+        # 7. Capacity check.
         confirmed_count = self.reservation_repo.count_confirmed_for_trip(data.trip_id)
         if confirmed_count >= trip.passenger_capacity:
             raise ConflictError("No available seats for this trip")
 
-        # 7. Create the daily selection.
+        # 8. Create the daily selection.
         return self.reservation_repo.create(
             trip_id=data.trip_id,
             student_id=student_id,
@@ -166,8 +226,8 @@ class ReservationService:
         student_id: int,
         data: ReservationCreateRequest,
     ) -> Reservation:
-        """Replace the student's existing TOMORROW selection with a new one."""
-        service_date = business_today() + timedelta(days=1)
+        """Replace the student's existing selection for the resolved date."""
+        service_date = self._resolve_service_date(data.service_date)
 
         self.validate_student(student_id)
         subscription = self._get_valid_subscription(student_id, service_date)
@@ -205,15 +265,16 @@ class ReservationService:
     def get_my_selection_for_date(
         self,
         student_id: int,
+        service_date: date | None = None,
     ) -> Reservation:
-        """Fetch the student's daily selection for tomorrow (404 if none)."""
-        service_date = business_today() + timedelta(days=1)
+        """Fetch the student's daily selection (default: tomorrow; 404 if none)."""
+        resolved_date = service_date or (business_today() + timedelta(days=1))
         reservation = self.reservation_repo.get_active_for_student_and_date(
-            student_id, service_date
+            student_id, resolved_date
         )
         if reservation is None:
             raise NotFoundError(
-                "No daily transportation selection found for tomorrow"
+                "No daily transportation selection found for the requested date"
             )
         return reservation
 

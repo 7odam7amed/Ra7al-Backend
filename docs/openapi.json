@@ -3409,8 +3409,8 @@
         "tags": [
           "Reservations"
         ],
-        "summary": "Create TOMORROW's daily transportation selection (Student only)",
-        "description": "Select tomorrow's trip plus outbound/return pickup points.\n\nRequires an ACTIVE subscription. The service date is always TOMORROW\n(derived server-side); trip and pickup points are validated server-side\nagainst the trip's route.",
+        "summary": "Create a daily transportation selection (Student only)",
+        "description": "Select a trip plus outbound/return pickup points for a service date.\n\nRequires an ACTIVE subscription covering the requested date. The service\ndate defaults to TOMORROW when omitted and must be today or later. The\nsubscription's weekly usage-day limit (days_per_week_snapshot, Mon-Sun)\nis enforced server-side; trip and pickup points are validated against the\ntrip's route.",
         "operationId": "book_trip_api_v1_reservations_post",
         "security": [
           {
@@ -3676,7 +3676,7 @@
           "Reservations"
         ],
         "summary": "Update TOMORROW's daily transportation selection (Student only)",
-        "description": "Replace tomorrow's existing selection (trip and/or pickup points).",
+        "description": "Replace the existing selection for the resolved service date.\n\n``service_date`` in the body defaults to TOMORROW when omitted.",
         "operationId": "update_my_tomorrow_selection_api_v1_reservations_my_tomorrow_put",
         "requestBody": {
           "content": {
@@ -7762,9 +7762,25 @@
             "type": "integer",
             "exclusiveMinimum": 0.0,
             "title": "Trip Id",
-            "description": "Scheduled trip ID departing TOMORROW",
+            "description": "Scheduled trip ID departing on the service date",
             "examples": [
               1
+            ]
+          },
+          "service_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Date",
+            "description": "Calendar date the student wants transportation (must be today or a future date within the subscription validity window). Defaults to TOMORROW when omitted.",
+            "examples": [
+              "2026-09-16"
             ]
           },
           "outbound_pickup_point_id": {
@@ -7811,7 +7827,7 @@
           "trip_id"
         ],
         "title": "ReservationCreateRequest",
-        "description": "Schema for creating/updating a DAILY transportation selection for TOMORROW.\n\nThe service date is NOT accepted from the client: the backend always books\nfor tomorrow (Today -> Tomorrow window), so a student cannot select\narbitrary historical or future dates."
+        "description": "Schema for creating/updating a DAILY transportation selection.\n\n``service_date`` is OPTIONAL and defaults to TOMORROW (Today -> Tomorrow\nwindow) for backward compatibility. When supplied it must be a future\ndate (today or later); past dates are rejected server-side. The selected\ndate must fall inside the student's ACTIVE subscription validity window\nand respect the subscription's ``days_per_week_snapshot`` weekly usage\nlimit — both enforced by the service layer, never trusted from the client."
       },
       "ReservationResponse": {
         "properties": {
@@ -9077,14 +9093,14 @@
             "maximum": 730.0,
             "exclusiveMinimum": 0.0,
             "title": "Duration Days",
-            "description": "Validity in calendar days (CEO-defined). Examples: DAILY=1, WEEKLY=7, MONTHLY=30 or 45, TERM=90 or 120."
+            "description": "Validity in calendar days (CEO-defined, all plan types). Examples: DAILY=30 with days_per_week=1 (flexible single-day weekly usage over a 30-day window), WEEKLY=7, MONTHLY=30 or 45, TERM=90 or 120."
           },
           "days_per_week": {
             "type": "integer",
             "maximum": 7.0,
             "exclusiveMinimum": 0.0,
             "title": "Days Per Week",
-            "description": "Maximum DISTINCT usage days per calendar week (Mon-Sun, UTC). Outbound + return on the same day count as ONE usage day.",
+            "description": "Maximum DISTINCT usage days per calendar week (Mon-Sun, UTC). Outbound + return on the same day count as ONE usage day. For DAILY plans this caps how many days per week the student may select transportation.",
             "examples": [
               4
             ]
@@ -9099,7 +9115,7 @@
           "days_per_week"
         ],
         "title": "SubscriptionPlanCreate",
-        "description": "Schema for creating a new subscription plan (CEO only).\n\nduration_days: calendar days the subscription stays valid (inclusive of\nthe start date). days_per_week: maximum DISTINCT usage days per calendar\nweek (Mon-Sun, UTC) — outbound + return scans on the same day count as ONE\nusage day. These values are snapshotted onto subscriptions at purchase so\nlater plan edits never change an active student's behavior."
+        "description": "Schema for creating a new subscription plan (CEO only).\n\nduration_days: calendar days the subscription stays valid (inclusive of\nthe start date). days_per_week: maximum DISTINCT usage days per calendar\nweek (Mon-Sun, UTC) — outbound + return scans on the same day count as ONE\nusage day. These values are snapshotted onto subscriptions at purchase so\nlater plan edits never change an active student's behavior.\n\nDAILY is FLEXIBLE: duration_days is the CEO-defined validity window and\ndays_per_week limits how many transportation days per week the student\nmay select via daily reservations. DAILY is NOT pinned to 1 day — every\nplan type uses the same CEO-defined bounds."
       },
       "SubscriptionPlanResponse": {
         "properties": {
@@ -9231,7 +9247,7 @@
               }
             ],
             "title": "Duration Days",
-            "description": "Optional new CEO-defined validity in days"
+            "description": "Optional new CEO-defined validity in days (all plan types, DAILY included)"
           },
           "days_per_week": {
             "anyOf": [

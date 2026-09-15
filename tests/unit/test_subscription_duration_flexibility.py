@@ -171,12 +171,12 @@ def test_duration_validation_bounds() -> None:
             name="Neg", plan_type=SubscriptionPlanType.TERM, duration_days=-10,
             days_per_week=4, price=Decimal("100"),
         )
-    # DAILY pinned to 1
-    with pytest.raises(PydanticValidationError):
-        SubscriptionPlanCreate(
-            name="Daily5", plan_type=SubscriptionPlanType.DAILY, duration_days=5,
-            days_per_week=1, price=Decimal("100"),
-        )
+    # DAILY is flexible (NOT pinned to 1): duration_days = 5 accepted
+    daily_flexible = SubscriptionPlanCreate(
+        name="Daily5", plan_type=SubscriptionPlanType.DAILY, duration_days=5,
+        days_per_week=1, price=Decimal("100"),
+    )
+    assert daily_flexible.duration_days == 5
     # duration above maximum rejected
     with pytest.raises(PydanticValidationError):
         SubscriptionPlanCreate(

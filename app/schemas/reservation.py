@@ -13,15 +13,27 @@ from app.schemas.user import UserResponse
 
 
 class ReservationCreateRequest(BaseModel):
-    """Schema for creating/updating a DAILY transportation selection for TOMORROW.
+    """Schema for creating/updating a DAILY transportation selection.
 
-    The service date is NOT accepted from the client: the backend always books
-    for tomorrow (Today -> Tomorrow window), so a student cannot select
-    arbitrary historical or future dates.
+    ``service_date`` is OPTIONAL and defaults to TOMORROW (Today -> Tomorrow
+    window) for backward compatibility. When supplied it must be a future
+    date (today or later); past dates are rejected server-side. The selected
+    date must fall inside the student's ACTIVE subscription validity window
+    and respect the subscription's ``days_per_week_snapshot`` weekly usage
+    limit — both enforced by the service layer, never trusted from the client.
     """
 
     trip_id: int = Field(
-        ..., gt=0, description="Scheduled trip ID departing TOMORROW", examples=[1]
+        ..., gt=0, description="Scheduled trip ID departing on the service date", examples=[1]
+    )
+    service_date: date | None = Field(
+        default=None,
+        description=(
+            "Calendar date the student wants transportation (must be today or "
+            "a future date within the subscription validity window). Defaults "
+            "to TOMORROW when omitted."
+        ),
+        examples=["2026-09-16"],
     )
     outbound_pickup_point_id: int | None = Field(
         default=None,

@@ -26,18 +26,20 @@ reservations_router = APIRouter()
     "",
     response_model=ReservationResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create TOMORROW's daily transportation selection (Student only)",
+    summary="Create a daily transportation selection (Student only)",
 )
 def book_trip(
     data: ReservationCreateRequest,
     current_user: User = Depends(STUDENT_ONLY),
     reservation_service: ReservationService = Depends(get_reservation_service),
 ) -> ReservationResponse:
-    """Select tomorrow's trip plus outbound/return pickup points.
+    """Select a trip plus outbound/return pickup points for a service date.
 
-    Requires an ACTIVE subscription. The service date is always TOMORROW
-    (derived server-side); trip and pickup points are validated server-side
-    against the trip's route.
+    Requires an ACTIVE subscription covering the requested date. The service
+    date defaults to TOMORROW when omitted and must be today or later. The
+    subscription's weekly usage-day limit (days_per_week_snapshot, Mon-Sun)
+    is enforced server-side; trip and pickup points are validated against the
+    trip's route.
     """
     reservation = reservation_service.book_trip(
         student_id=current_user.id,
@@ -56,7 +58,10 @@ def update_my_tomorrow_selection(
     current_user: User = Depends(STUDENT_ONLY),
     reservation_service: ReservationService = Depends(get_reservation_service),
 ) -> ReservationResponse:
-    """Replace tomorrow's existing selection (trip and/or pickup points)."""
+    """Replace the existing selection for the resolved service date.
+
+    ``service_date`` in the body defaults to TOMORROW when omitted.
+    """
     reservation = reservation_service.update_selection(
         student_id=current_user.id,
         data=data,

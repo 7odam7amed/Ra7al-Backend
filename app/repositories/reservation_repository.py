@@ -95,6 +95,41 @@ class ReservationRepository:
         )
         return self.db.scalar(stmt) or 0
 
+    def count_confirmed_for_subscription_in_window(
+        self, subscription_id: int, window_start: date, window_end: date
+    ) -> int:
+        """Count CONFIRMED selections for one subscription inside a service-date window.
+
+        Used for the weekly usage limit: each CONFIRMED reservation's
+        service_date is one distinct transportation usage day, so the count
+        inside the Mon-Sun window is the number of used usage days. Reservations
+        linked to other subscriptions are never included (filtered by
+        subscription_id).
+        """
+        stmt = select(func.count(Reservation.id)).where(
+            Reservation.subscription_id == subscription_id,
+            Reservation.status == ReservationStatus.CONFIRMED,
+            Reservation.service_date >= window_start,
+            Reservation.service_date <= window_end,
+        )
+        return self.db.scalar(stmt) or 0
+
+    def get_subscription_row_for_update(self, subscription_id: int):
+        """Lock the subscription row FOR UPDATE to serialize weekly-limit checks.
+
+        SQLite in tests doesn't support SELECT FOR UPDATE, so fall back to a
+        plain read (mirrors get_trip_for_update).
+        """
+        try:
+            stmt = (
+                select(Subscription)
+                .where(Subscription.id == subscription_id)
+                .with_for_update()
+            )
+            return self.db.scalars(stmt).first()
+        except Exception:
+            return self.db.get(Subscription, subscription_id)
+
     def student_has_confirmed_reservation_on_bus(
         self, student_id: int, bus_id: int
     ) -> bool:

@@ -2,7 +2,8 @@
 
 Guards the schema/model layers:
 - WEEKLY/MONTHLY/TERM durations are CEO-defined (never hardcoded to 7/30/90).
-- DAILY stays pinned to 1 day.
+- DAILY is FLEXIBLE: duration_days is CEO-defined (NOT pinned to 1) and
+  days_per_week caps weekly transportation usage days.
 - days_per_week is a required, bounded (1-7) weekly usage-day allowance.
 - Subscription validity = start_date + duration_days (inclusive).
 """
@@ -75,23 +76,35 @@ def test_term_plan_still_ceo_defined(days: int) -> None:
     assert plan.duration_days == days
 
 
-def test_daily_plan_still_pinned_to_one_day() -> None:
-    with pytest.raises(PydanticValidationError):
-        SubscriptionPlanCreate(
-            name="Daily 5",
-            plan_type=SubscriptionPlanType.DAILY,
-            duration_days=5,
-            days_per_week=1,
-            price=Decimal("40.00"),
-        )
-    ok = SubscriptionPlanCreate(
+def test_daily_plan_is_flexible_ceo_defined() -> None:
+    """DAILY accepts any CEO-defined duration: validity window, not 1 day."""
+    flexible = SubscriptionPlanCreate(
+        name="Daily Flexible",
+        plan_type=SubscriptionPlanType.DAILY,
+        duration_days=30,
+        days_per_week=1,
+        price=Decimal("40.00"),
+    )
+    assert flexible.duration_days == 30
+    assert flexible.days_per_week == 1
+    # duration_days=7 with days_per_week=7 is equally valid.
+    week = SubscriptionPlanCreate(
+        name="Daily 7",
+        plan_type=SubscriptionPlanType.DAILY,
+        duration_days=7,
+        days_per_week=MAX_PLAN_DAYS_PER_WEEK,
+        price=Decimal("40.00"),
+    )
+    assert week.duration_days == 7
+    # duration_days=1 remains valid too (backward compatible).
+    single = SubscriptionPlanCreate(
         name="Daily 1",
         plan_type=SubscriptionPlanType.DAILY,
         duration_days=1,
         days_per_week=1,
         price=Decimal("40.00"),
     )
-    assert ok.duration_days == 1
+    assert single.duration_days == 1
 
 
 def test_days_per_week_required_and_bounded() -> None:

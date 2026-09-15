@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 import math
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import SubscriptionPlanType
 from app.models.subscription_plan import MAX_PLAN_DURATION_DAYS, MAX_PLAN_DAYS_PER_WEEK
@@ -27,6 +27,11 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
     week (Mon-Sun, UTC) — outbound + return scans on the same day count as ONE
     usage day. These values are snapshotted onto subscriptions at purchase so
     later plan edits never change an active student's behavior.
+
+    DAILY is FLEXIBLE: duration_days is the CEO-defined validity window and
+    days_per_week limits how many transportation days per week the student
+    may select via daily reservations. DAILY is NOT pinned to 1 day — every
+    plan type uses the same CEO-defined bounds.
     """
 
     duration_days: int = Field(
@@ -34,8 +39,10 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
         gt=0,
         le=MAX_PLAN_DURATION_DAYS,
         description=(
-            "Validity in calendar days (CEO-defined). Examples: DAILY=1, "
-            "WEEKLY=7, MONTHLY=30 or 45, TERM=90 or 120."
+            "Validity in calendar days (CEO-defined, all plan types). "
+            "Examples: DAILY=30 with days_per_week=1 (flexible single-day "
+            "weekly usage over a 30-day window), WEEKLY=7, MONTHLY=30 or 45, "
+            "TERM=90 or 120."
         ),
     )
     days_per_week: int = Field(
@@ -44,17 +51,12 @@ class SubscriptionPlanCreate(SubscriptionPlanBase):
         le=MAX_PLAN_DAYS_PER_WEEK,
         description=(
             "Maximum DISTINCT usage days per calendar week (Mon-Sun, UTC). "
-            "Outbound + return on the same day count as ONE usage day."
+            "Outbound + return on the same day count as ONE usage day. For "
+            "DAILY plans this caps how many days per week the student may "
+            "select transportation."
         ),
         examples=[4],
     )
-
-    @model_validator(mode="after")
-    def validate_daily_duration(self) -> "SubscriptionPlanCreate":
-        # DAILY plans represent a single transportation service day.
-        if self.plan_type == SubscriptionPlanType.DAILY and self.duration_days != 1:
-            raise ValueError("DAILY plans must use a duration of exactly 1 day")
-        return self
 
     @field_validator("name")
     @classmethod
@@ -78,7 +80,7 @@ class SubscriptionPlanUpdate(BaseModel):
         default=None,
         gt=0,
         le=MAX_PLAN_DURATION_DAYS,
-        description="Optional new CEO-defined validity in days",
+        description="Optional new CEO-defined validity in days (all plan types, DAILY included)",
     )
     days_per_week: int | None = Field(
         default=None,

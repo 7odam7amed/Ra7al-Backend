@@ -57,12 +57,16 @@ def _create_mock_trip(
 
 
 def _make_subscription(student_id: int = 1, subscription_id: int = 50) -> Subscription:
-    return Subscription(
+    sub = Subscription(
         id=subscription_id,
         student_id=student_id,
         plan_id=1,
         status=SubscriptionStatus.ACTIVE,
     )
+    # Snapshot values drive the weekly usage-day limit in book_trip.
+    sub.duration_days_snapshot = 30
+    sub.days_per_week_snapshot = 7
+    return sub
 
 
 def _make_service() -> tuple[ReservationService, MagicMock, MagicMock, MagicMock, MagicMock]:
@@ -80,6 +84,13 @@ def _stub_student_and_subscription(
     subscription_repo.get_active_for_student_on_date.return_value = _make_subscription(
         student_id
     )
+
+
+def _stub_weekly_limit_ok(reservation_repo: MagicMock, used_days: int = 0) -> None:
+    """Stub the weekly-limit accounting: locked row + used usage-day count."""
+    locked = _make_subscription()
+    reservation_repo.get_subscription_row_for_update.return_value = locked
+    reservation_repo.count_confirmed_for_subscription_in_window.return_value = used_days
 
 
 def test_validate_student() -> None:
@@ -144,6 +155,7 @@ def test_book_trip_success() -> None:
     reservation_repo.get_trip_for_update.return_value = trip
     reservation_repo.get_active_for_student_and_date.return_value = None
     reservation_repo.count_confirmed_for_trip.return_value = 5
+    _stub_weekly_limit_ok(reservation_repo)
 
     expected_reservation = Reservation(
         id=100, trip_id=10, student_id=1, subscription_id=50, status=ReservationStatus.CONFIRMED
@@ -204,14 +216,16 @@ def test_book_trip_trip_not_scheduled() -> None:
 
 
 def test_book_trip_not_tomorrow_rejected() -> None:
-    """A trip departing TODAY (or any non-tomorrow date) cannot be selected."""
+    """A trip departing TODAY (or any non-selected service date) cannot be selected."""
     service, reservation_repo, subscription_repo, trip_repo, user_repo = _make_service()
 
     student = _create_mock_user(1, RoleEnum.STUDENT)
     user_repo.get_by_id.return_value = student
     _stub_student_and_subscription(subscription_repo)
 
-    today_dep = datetime.now(timezone.utc) + timedelta(hours=30)
+    # Trip departs 3 days out: never the resolved service date (tomorrow),
+    # regardless of the current UTC time when the test runs.
+    today_dep = datetime.now(timezone.utc) + timedelta(days=3)
     trip = _create_mock_trip(10, TripStatus.SCHEDULED, departure_time=today_dep)
     reservation_repo.get_trip_for_update.return_value = trip
 
@@ -266,6 +280,7 @@ def test_book_trip_capacity_full() -> None:
     reservation_repo.get_trip_for_update.return_value = trip
     reservation_repo.get_active_for_student_and_date.return_value = None
     reservation_repo.count_confirmed_for_trip.return_value = 5
+    _stub_weekly_limit_ok(reservation_repo)
 
     with pytest.raises(ConflictError, match="No available seats"):
         service.book_trip(

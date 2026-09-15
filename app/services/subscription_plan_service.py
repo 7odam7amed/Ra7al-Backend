@@ -60,9 +60,9 @@ class SubscriptionPlanService:
                 f"days_per_week cannot exceed {MAX_PLAN_DAYS_PER_WEEK}"
             )
 
-        # DAILY plans represent a single transportation day.
-        if data.plan_type == SubscriptionPlanType.DAILY and data.duration_days != 1:
-            raise ValidationError("DAILY plans must use a duration of exactly 1 day")
+        # DAILY plans are FLEXIBLE: duration_days is the CEO-defined validity
+        # window and days_per_week caps weekly transportation usage days.
+        # No plan type pins duration — every type uses the same bounds above.
 
         # Avoid exact duplicate packages (same type, duration, name, weekly allowance).
         existing = self.plan_repo.get_by_type_name_duration(
@@ -108,13 +108,7 @@ class SubscriptionPlanService:
                 raise ValidationError(
                     f"Plan duration cannot exceed {MAX_PLAN_DURATION_DAYS} days"
                 )
-            if (
-                plan.plan_type == SubscriptionPlanType.DAILY
-                and data.duration_days != 1
-            ):
-                raise ValidationError(
-                    "DAILY plans must use a duration of exactly 1 day"
-                )
+            # DAILY plans accept any CEO-defined duration (flexible validity):
 
         if data.days_per_week is not None:
             if data.days_per_week < 1:

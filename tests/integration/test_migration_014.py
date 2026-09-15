@@ -18,8 +18,8 @@ def _alembic_versions_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 
-def test_migration_015_is_current_head() -> None:
-    """015 must be the single Alembic head reachable from the chain."""
+def test_migration_016_is_current_head() -> None:
+    """016 must be the single Alembic head reachable from the chain."""
     revisions: dict[str, str | None] = {}
     for path in _alembic_versions_dir().glob("*.py"):
         content = path.read_text(encoding="utf-8")
@@ -34,13 +34,15 @@ def test_migration_015_is_current_head() -> None:
 
     assert "014_bus_image_flexible_plans" in revisions
     assert revisions["014_bus_image_flexible_plans"] == "013_remove_otp_verification"
-    assert "015_decouple_subscription_selection" in revisions
-    assert revisions["015_decouple_subscription_selection"] == "014_bus_image_flexible_plans"
+    assert "015_subscription_selection" in revisions
+    assert revisions["015_subscription_selection"] == "014_bus_image_flexible_plans"
+    assert "016_daily_flexible_duration" in revisions
+    assert revisions["016_daily_flexible_duration"] == "015_subscription_selection"
 
-    # Single head: no revision besides 015 may be un-referenced as a down_revision
+    # Single head: no revision besides 016 may be un-referenced as a down_revision
     referenced = {d for d in revisions.values() if d is not None}
     heads = [r for r in revisions if r not in referenced]
-    assert heads == ["015_decouple_subscription_selection"]
+    assert heads == ["016_daily_flexible_duration"]
 
 
 def test_migration_014_upgrade_adds_image_url_non_destructively() -> None:
