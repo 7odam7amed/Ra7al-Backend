@@ -42,11 +42,13 @@ def test_migration_017_is_current_head() -> None:
     assert revisions["017_transportation_refactor"] == "016_daily_flexible_duration"
     assert "018_drop_subscription_points" in revisions
     assert revisions["018_drop_subscription_points"] == "017_transportation_refactor"
+    assert "019_trip_stops_updated_at" in revisions
+    assert revisions["019_trip_stops_updated_at"] == "018_drop_subscription_points"
 
-    # Single head: no revision besides 018 may be un-referenced as a down_revision
+    # Single head: no revision besides 019 may be un-referenced as a down_revision
     referenced = {d for d in revisions.values() if d is not None}
     heads = [r for r in revisions if r not in referenced]
-    assert heads == ["018_drop_subscription_points"]
+    assert heads == ["019_trip_stops_updated_at"]
 
     # alembic_version.version_num is VARCHAR(32): every revision id must fit
     for revision_id in revisions:
@@ -110,6 +112,39 @@ def test_models_do_not_drift_from_alembic_chain() -> None:
             f"Table '{table.name}' exists in ORM metadata but is never referenced "
             f"by any Alembic migration file"
         )
+
+
+def test_migration_019_reconciles_trip_stops_updated_at() -> None:
+    """Regression guard for the production 500 on GET /api/v1/trips.
+
+    Migration 017 created trip_stops WITHOUT updated_at while the TripStop
+    ORM model inherits it from BaseModel. Migration 019 must add the column
+    with the project-wide timestamp semantics (timestamptz, NOT NULL,
+    server_default now()) and backfill existing rows; its downgrade must
+    remove only that column.
+    """
+    content = (
+        _alembic_versions_dir() / "019_trip_stops_updated_at.py"
+    ).read_text(encoding="utf-8")
+
+    assert "op.add_column(" in content
+    assert '"trip_stops",' in content
+    assert '"updated_at"' in content
+    assert "sa.DateTime(timezone=True)" in content
+    assert "server_default=sa.func.now()" in content
+    assert "nullable=False" in content
+    # Existing production rows must receive a valid timestamp.
+    assert "UPDATE trip_stops SET updated_at" in content
+    # Downgrade removes only the newly added column.
+    downgrade = content.split("def downgrade")[1]
+    assert 'op.drop_column("trip_stops", "updated_at")' in downgrade
+
+    # The ORM model must declare exactly what the migration creates.
+    from app.models.base import BaseModel
+
+    column = BaseModel.metadata.tables["trip_stops"].columns["updated_at"]
+    assert column.nullable is False
+    assert column.server_default is not None
 
 
 def test_bus_image_url_is_optional_in_create_path() -> None:
