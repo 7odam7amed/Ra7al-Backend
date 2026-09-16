@@ -787,7 +787,7 @@ Response `201`: `ReservationResponse` (`status: "CONFIRMED"`).
 Errors: `403` (non-student), `404`, `409`, `422`.
 
 ### `GET /reservations/upcoming-trips` — STUDENT
-The student transportation screen (مواصلات الغد): **ALL upcoming SCHEDULED trips** (not only tomorrow). Query: `page`, `page_size`, `direction` (optional filter).
+The student transportation screen (مواصلات الغد): **ALL upcoming SCHEDULED trips** (not only tomorrow) whose scheduled completion time has not passed. Time-based expiration is backend-enforced: a trip disappears once its scheduled completion time (the LAST stop's departure time = `estimated_arrival_time`, UTC) has passed — boarding confirmation is NOT required, and Trip/Reservation/Boarding history is preserved. Query: `page`, `page_size`, `direction` (optional filter).
 
 `StudentTripViewResponse`:
 

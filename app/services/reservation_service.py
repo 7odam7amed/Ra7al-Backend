@@ -346,9 +346,14 @@ class ReservationService:
     ) -> tuple[list[dict], int]:
         """All eligible upcoming trips (not just tomorrow) with booking states.
 
-        Upcoming = SCHEDULED trips departing today or later. Each item carries
-        the student's booking state (AVAILABLE/BOOKED/FULL) and the dynamic
-        destination for their account.
+        Upcoming = SCHEDULED trips whose scheduled completion time has not
+        yet passed. Completion is time-based ONLY: a trip is eligible while
+        ``estimated_arrival_time`` (the LAST selected stop's scheduled
+        departure time) is still in the future, regardless of any boarding
+        confirmation. Once the completion time has passed the trip is
+        excluded here even if it is still SCHEDULED and was never boarded.
+        Each item carries the student's booking state (AVAILABLE/BOOKED/FULL)
+        and the dynamic destination for their account.
         """
         if page < 1:
             raise ValidationError("Page number must be greater than or equal to 1")
@@ -357,15 +362,13 @@ class ReservationService:
 
         student = self.validate_student(student_id)
 
-        now_start = datetime.combine(
-            business_today(), datetime.min.time(), tzinfo=timezone.utc
-        )
+        now = datetime.now(timezone.utc)
         trips, total = self.trip_repo.list(
             page=page,
             page_size=page_size,
             status=TripStatus.SCHEDULED,
             direction=direction,
-            departure_after=now_start,
+            arrival_after=now,
         )
 
         items = []

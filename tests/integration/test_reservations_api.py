@@ -11,6 +11,7 @@ Contract under test:
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+from unittest.mock import MagicMock
 import secrets
 import uuid
 
@@ -172,12 +173,20 @@ def _setup_api_prerequisites(
     return route, bus, supervisor, trip
 
 
-def _selection_payload(trip: Trip, point_index: int = 0) -> dict:
+def _selection_payload(
+    trip: Trip, point_index: int = 0, service_date: date | None = None
+) -> dict:
+    """Booking payload for a trip's stop; optional explicit service_date
+    (needed for TODAY-departing trips, since omitted dates resolve to
+    TOMORROW server-side)."""
     stops = sorted(trip.trip_stops, key=lambda s: s.stop_order)
-    return {
+    payload = {
         "trip_id": trip.id,
         "selected_pickup_point_id": stops[point_index].pickup_point_id,
     }
+    if service_date is not None:
+        payload["service_date"] = service_date.isoformat()
+    return payload
 
 
 def test_unauthenticated_requests_rejected(client_with_db: TestClient) -> None:
@@ -521,6 +530,353 @@ def test_ownership_enforcement(client_with_db: TestClient, db_session: Session) 
     )
     assert res_cancel_sup.status_code == 200
     assert res_cancel_sup.json()["status"] == "CANCELLED"
+
+
+# ---------------------------------------------------------------------------
+# Time-based expiration of upcoming trips
+# ---------------------------------------------------------------------------
+
+
+def _trip_completion_time(trip: Trip) -> datetime:
+    """The scheduled completion time used for expiration: the LAST stop's
+    departure time (synced into Trip.estimated_arrival_time by the service).
+
+    SQLite (the test database) returns naive datetimes; normalize to aware
+    UTC so comparisons against ``datetime.now(timezone.utc)`` are valid.
+    """
+    stops = sorted(trip.trip_stops, key=lambda s: s.stop_order)
+    completion = stops[-1].departure_time
+    if completion.tzinfo is None:
+        completion = completion.replace(tzinfo=timezone.utc)
+    return completion
+
+
+def _headers(std_token: str) -> dict:
+    return {"Authorization": f"Bearer {std_token}"}
+
+
+def test_upcoming_trips_future_trip_appears(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """1. A trip whose scheduled completion time is in the future appears."""
+    _, _, _, trip = _setup_api_prerequisites(
+        db_session,
+        departure_time=datetime.now(timezone.utc) + timedelta(days=2),
+    )
+    _, std_token = _create_user_and_token(
+        db_session, "s_exp_future@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res.status_code == 200
+    assert any(t["trip_id"] == trip.id for t in res.json()["items"])
+
+
+def test_upcoming_trips_excluded_after_completion_time_passes(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """2. A SCHEDULED trip whose scheduled completion time (last stop
+    departure) has passed does NOT appear, even though it departs today."""
+    now = datetime.now(timezone.utc)
+    _, _, _, trip = _setup_api_prerequisites(
+        db_session,
+        # First stop already departed; last stop 30 min later is also past.
+        departure_time=now - timedelta(minutes=90),
+    )
+    assert _trip_completion_time(trip) < now
+
+    _, std_token = _create_user_and_token(
+        db_session, "s_exp_past@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers=_headers(std_token),
+    )
+    assert res.status_code == 200
+    assert all(t["trip_id"] != trip.id for t in res.json()["items"])
+
+
+def test_upcoming_trips_expires_without_boarding_confirmation(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """3. Expiry does NOT require boarding: a student who booked but never
+    confirmed boarding no longer sees the trip once its completion time
+    has passed. No boarding record is ever created."""
+    from app.models.boarding import BoardingRecord
+
+    now = datetime.now(timezone.utc)
+    _, _, _, trip = _setup_api_prerequisites(
+        db_session,
+        departure_time=now - timedelta(minutes=90),
+    )
+    student, std_token = _create_user_and_token(
+        db_session, "s_exp_noboard@test.edu", RoleEnum.STUDENT
+    )
+    _create_active_subscription(db_session, student.id)
+
+    # The student DID book this trip while it was upcoming.
+    assert client_with_db.post(
+        "/api/v1/reservations",
+        json=_selection_payload(trip, service_date=date.today()),
+        headers=_headers(std_token),
+    ).status_code == 201
+
+    # Sanity: the trip has fully passed with zero boarding records.
+    assert (
+        db_session.query(BoardingRecord).filter_by(trip_id=trip.id).count() == 0
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers=_headers(std_token),
+    )
+    assert res.status_code == 200
+    assert all(t["trip_id"] != trip.id for t in res.json()["items"])
+
+
+def test_upcoming_trips_expires_with_boarding_confirmation(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """4. A student who DID confirm boarding also stops seeing the trip
+    after its scheduled completion time passes."""
+    from app.models.boarding import BoardingRecord
+
+    now = datetime.now(timezone.utc)
+    route, _, supervisor, trip = _setup_api_prerequisites(
+        db_session,
+        departure_time=now - timedelta(minutes=90),
+    )
+    student, std_token = _create_user_and_token(
+        db_session, "s_exp_boarded@test.edu", RoleEnum.STUDENT
+    )
+    sub = _create_active_subscription(db_session, student.id)
+
+    assert client_with_db.post(
+        "/api/v1/reservations",
+        json=_selection_payload(trip, service_date=date.today()),
+        headers=_headers(std_token),
+    ).status_code == 201
+
+    # Student boarded the outbound trip (confirmed boarding).
+    db_session.add(
+        BoardingRecord(
+            subscription_id=sub.id,
+            student_id=student.id,
+            trip_id=trip.id,
+            supervisor_id=supervisor.id,
+            direction=BoardingDirection.OUTBOUND,
+            pickup_point_id=trip.trip_stops[0].pickup_point_id,
+        )
+    )
+    db_session.commit()
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers=_headers(std_token),
+    )
+    assert res.status_code == 200
+    assert all(t["trip_id"] != trip.id for t in res.json()["items"])
+
+
+def test_upcoming_trips_expiry_preserves_history_data(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """5. Expiry is a filter only: the Trip, the Reservation, and the
+    student's history endpoint remain fully intact afterwards."""
+    now = datetime.now(timezone.utc)
+    _, _, _, trip = _setup_api_prerequisites(
+        db_session,
+        departure_time=now - timedelta(minutes=90),
+    )
+    student, std_token = _create_user_and_token(
+        db_session, "s_exp_hist@test.edu", RoleEnum.STUDENT
+    )
+    _create_active_subscription(db_session, student.id)
+
+    res_book = client_with_db.post(
+        "/api/v1/reservations",
+        json=_selection_payload(trip, service_date=date.today()),
+        headers=_headers(std_token),
+    )
+    assert res_book.status_code == 201
+    reservation_id = res_book.json()["id"]
+
+    # The expired trip is gone from upcoming trips...
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers=_headers(std_token),
+    )
+    assert all(t["trip_id"] != trip.id for t in res.json()["items"])
+
+    # ...but the Trip row still exists and stays SCHEDULED.
+    assert db_session.get(Trip, trip.id) is not None
+    db_session.refresh(trip)
+    assert trip.status == TripStatus.SCHEDULED
+
+    # ...and GET /reservations/{id} still returns the booking.
+
+    # ...the Reservation row still exists and stays CONFIRMED.
+    assert db_session.get(Reservation, reservation_id) is not None
+    res_single = client_with_db.get(
+        f"/api/v1/reservations/{reservation_id}",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res_single.status_code == 200
+    assert res_single.json()["status"] == "CONFIRMED"
+
+    # ...and /reservations/my still lists the booking.
+    res_my = client_with_db.get(
+        "/api/v1/reservations/my",
+        headers=_headers(std_token),
+    )
+    assert res_my.status_code == 200
+    assert any(i["id"] == reservation_id for i in res_my.json()["items"])
+
+
+def test_upcoming_trips_expiry_boundary_in_progress(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Boundary: the LAST stop still in the future keeps the trip upcoming
+    even after the FIRST stop has departed (08:00/09:00 rule at 08:30).
+
+    The last stop and estimated_arrival_time are shifted together, mirroring
+    the production invariant that the service derives the trip-level arrival
+    from the last stop's departure time.
+    """
+    now = datetime.now(timezone.utc)
+    _, _, _, trip = _setup_api_prerequisites(
+        db_session,
+        # First stop (= trip departure) departed 30 min ago...
+        departure_time=now - timedelta(minutes=30),
+    )
+    # ...while the LAST stop + trip arrival are 30 min in the future.
+    stops = sorted(trip.trip_stops, key=lambda s: s.stop_order)
+    stops[-1].departure_time = now + timedelta(minutes=30)
+    trip.estimated_arrival_time = now + timedelta(minutes=30)
+    db_session.commit()
+
+    first_departure = stops[0].departure_time
+    if first_departure.tzinfo is None:
+        first_departure = first_departure.replace(tzinfo=timezone.utc)
+    assert first_departure < now                       # 08:00 analogue passed
+    assert _trip_completion_time(trip) > now           # 09:00 analogue future
+
+    _, std_token = _create_user_and_token(
+        db_session, "s_exp_edge@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers=_headers(std_token),
+    )
+    assert res.status_code == 200
+    assert any(t["trip_id"] == trip.id for t in res.json()["items"])
+
+
+def test_upcoming_trips_expiry_applies_to_return_direction(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """6. RETURN trips follow the same time-based expiration rule."""
+    now = datetime.now(timezone.utc)
+    _, _, _, passed = _setup_api_prerequisites(
+        db_session,
+        direction=TripDirection.RETURN,
+        departure_time=now - timedelta(minutes=90),
+    )
+    _, _, _, future = _setup_api_prerequisites(
+        db_session,
+        direction=TripDirection.RETURN,
+        departure_time=now + timedelta(days=2),
+    )
+    _, std_token = _create_user_and_token(
+        db_session, "s_exp_return@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips?direction=RETURN",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res.status_code == 200
+    ids = {t["trip_id"] for t in res.json()["items"]}
+    assert passed.id not in ids
+    assert future.id in ids
+
+
+def test_upcoming_trips_completion_time_is_last_stop_departure(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """7. The completion instant is the LAST stop's departure time, not the
+    trip-level departure_time: 08:00 first / 09:00 last means the trip stays
+    upcoming until 09:00, per the documented rule."""
+    now = datetime.now(timezone.utc)
+
+    # Both trips depart at the SAME time (90 min ago, the 08:00 analogue).
+    # Trip A: last stop + arrival 30 min ago (09:00 analogue, passed) -> hidden.
+    _, _, _, trip_a = _setup_api_prerequisites(
+        db_session,
+        departure_time=now - timedelta(minutes=90),
+    )
+    stops_a = sorted(trip_a.trip_stops, key=lambda s: s.stop_order)
+    stops_a[-1].departure_time = now - timedelta(minutes=30)
+    trip_a.estimated_arrival_time = now - timedelta(minutes=30)
+
+    # Trip B: last stop + arrival 30 min ahead (09:00 analogue, future) -> shown.
+    _, _, _, trip_b = _setup_api_prerequisites(
+        db_session,
+        departure_time=now - timedelta(minutes=90),
+    )
+    stops_b = sorted(trip_b.trip_stops, key=lambda s: s.stop_order)
+    stops_b[-1].departure_time = now + timedelta(minutes=30)
+    trip_b.estimated_arrival_time = now + timedelta(minutes=30)
+    db_session.commit()
+
+    _, std_token = _create_user_and_token(
+        db_session, "s_exp_laststop@test.edu", RoleEnum.STUDENT
+    )
+
+    res = client_with_db.get(
+        "/api/v1/reservations/upcoming-trips",
+        headers={"Authorization": f"Bearer {std_token}"},
+    )
+    assert res.status_code == 200
+    ids = {t["trip_id"] for t in res.json()["items"]}
+    assert trip_a.id not in ids   # last stop passed -> expired
+    assert trip_b.id in ids       # last stop future -> upcoming
+
+
+def test_upcoming_trips_uses_utc_business_timezone(
+    client_with_db: TestClient, db_session: Session
+) -> None:
+    """Timezone: expiration is evaluated in UTC, the project's canonical
+    business timezone (app/utils/dates.py: BUSINESS_TIMEZONE = timezone.utc)."""
+    from app.utils.dates import BUSINESS_TIMEZONE
+
+    assert BUSINESS_TIMEZONE == timezone.utc
+
+    # Directly verify the service cutoff is now() in UTC (the exact instant,
+    # NOT a day-start boundary like the previous day-granularity filter).
+    from app.services.reservation_service import ReservationService
+
+    service = ReservationService(
+        reservation_repo=MagicMock(),
+        subscription_repo=MagicMock(),
+        trip_repo=MagicMock(),
+        user_repo=MagicMock(),
+    )
+    student = MagicMock()
+    student.role = RoleEnum.STUDENT
+    student.is_active = True
+    service.user_repo.get_by_id.return_value = student
+    service.trip_repo.list.return_value = ([], 0)
+    service.list_upcoming_trips(student_id=1)
+    cutoff = service.trip_repo.list.call_args.kwargs["arrival_after"]
+    assert cutoff.tzinfo is timezone.utc
+    # The cutoff must be 'now' (within seconds), not a day-start boundary.
+    assert abs((datetime.now(timezone.utc) - cutoff).total_seconds()) < 30
 
 
 def test_upcoming_trips_for_students(

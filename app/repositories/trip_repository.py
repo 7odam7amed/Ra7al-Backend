@@ -42,6 +42,7 @@ class TripRepository:
         direction: TripDirection | None = None,
         departure_after=None,
         departure_before=None,
+        arrival_after=None,
     ) -> tuple[list[Trip], int]:
         """List trips with pagination and multi-field filters."""
         stmt = self._base_stmt()
@@ -74,6 +75,14 @@ class TripRepository:
         if departure_before is not None:
             stmt = stmt.where(Trip.departure_time <= departure_before)
             count_stmt = count_stmt.where(Trip.departure_time <= departure_before)
+
+        if arrival_after is not None:
+            # Time-based expiration: only trips whose scheduled completion
+            # time (estimated_arrival_time = last stop's departure time) is
+            # still in the future. Strictly greater: the instant the
+            # completion time has passed, the trip no longer matches.
+            stmt = stmt.where(Trip.estimated_arrival_time > arrival_after)
+            count_stmt = count_stmt.where(Trip.estimated_arrival_time > arrival_after)
 
         total = self.db.scalar(count_stmt) or 0
 

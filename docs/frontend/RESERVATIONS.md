@@ -78,6 +78,8 @@ Destination behavior:
 
 `GET /api/v1/reservations/upcoming-trips` (Student only) returns ALL upcoming `SCHEDULED` trips (not only tomorrow) with direction, ordered stops, stop times, capacity, confirmed count, availability, booking state, and destination info per the rules above.
 
+**Time-based expiration (backend-enforced):** a trip is "upcoming" only while its scheduled completion time has not passed. Completion is derived from the trip's schedule — the LAST stop's departure time (`estimated_arrival_time`), evaluated in UTC — NOT from boarding confirmation. Once that time has passed, the trip disappears from this endpoint even if the student never confirmed boarding. The Trip, Reservations, and Boarding records are preserved; history remains available via `/reservations/my` and `/my/history`.
+
 ## 5. Own bookings & history
 
 - `GET /api/v1/reservations/my` — the student's bookings.
